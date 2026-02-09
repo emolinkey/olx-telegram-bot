@@ -67,6 +67,7 @@ class OLXProMonitor:
                 r.raise_for_status()
                 soup = BeautifulSoup(r.text, "html.parser")
                 ads = []
+                print(f"DEBUG: Нашел {len(ads)} объявлений на странице")
                 for card in soup.select('div[data-cy="l-card"]'):
                     l = card.find("a")
                     if l and "promoted" not in l.get("href", ""):
@@ -111,6 +112,7 @@ class OLXProMonitor:
 if __name__ == "__main__":
 
     asyncio.run(OLXProMonitor().run())
+
 
 
 
