@@ -67,7 +67,7 @@ class OLXProMonitor:
 
     async def run(self):
         try:
-           # await self.bot.send_message(CHAT_ID, "✅ <b>Бот запущен в облаке!</b>", parse_mode="HTML")
+            pass # await self.bot.send_message(CHAT_ID, "✅ <b>Бот запущен в облаке!</b>", parse_mode="HTML")
         except: pass
 
         while True:
@@ -95,3 +95,4 @@ class OLXProMonitor:
 if __name__ == "__main__":
 
     asyncio.run(OLXProMonitor().run())
+
