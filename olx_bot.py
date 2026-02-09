@@ -84,9 +84,9 @@ class OLXProMonitor:
 
     async def run(self):
         try:
-            pass # await self.bot.send_message(CHAT_ID, "✅ <b>Бот запущен в облаке!</b>", parse_mode="HTML")
-        except: pass
-
+            await self.bot.send_message(CHAT_ID, "🔎 Бот запущен и начал поиск...")
+        except Exception as e:
+            print(f"Ошибка отправки: {e}")
         while True:
             if (datetime.now() - self.last_heartbeat).total_seconds() >= HEARTBEAT_INTERVAL:
                 uptime = str(datetime.now() - self.start_time).split('.')[0]
@@ -112,6 +112,7 @@ class OLXProMonitor:
 if __name__ == "__main__":
 
     asyncio.run(OLXProMonitor().run())
+
 
 
 
