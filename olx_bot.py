@@ -61,26 +61,54 @@ class OLXProMonitor:
             "Upgrade-Insecure-Requests": "1"
         }
         # И строку запуска клиента тоже меняем (ставим False и добавляем headers)
-        async with httpx.AsyncClient(headers=headers, timeout=30.0, http2=False, follow_redirects=True) as client:
-            try:
-                r = await client.get(OLX_URL, headers=headers)
-                r.raise_for_status()
+       async def fetch_ads(self):
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+            "Accept-Language": "pl-PL,pl;q=0.9,en-US;q=0.8,en;q=0.7",
+            "Referer": "https://www.google.com/"
+        }
+        
+        # Данные твоего прокси от Webshare
+        proxy_url = "http://nyntgqyu:2c5wo0xukywv@31.59.20.176:6754/"
+
+        try:
+            async with httpx.AsyncClient(
+                proxies=proxy_url, 
+                headers=headers, 
+                timeout=30.0, 
+                http2=False,
+                follow_redirects=True
+            ) as client:
+                r = await client.get(OLX_URL)
+                if r.status_code != 200:
+                    print(f"Ошибка {r.status_code} через прокси")
+                    return []
+                
                 soup = BeautifulSoup(r.text, "html.parser")
-                ads = []
-                print(f"DEBUG: Нашел {len(ads)} объявлений на странице")
-                for card in soup.select('div[data-cy="l-card"]'):
-                    l = card.find("a")
-                    if l and "promoted" not in l.get("href", ""):
-                        h = l.get("href")
-                        link = "https://www.olx.pl" + h.split('?')[0] if h.startswith('/') else h.split('?')[0]
-                        ads.append({
-                            "link": link,
-                            "price": card.find("p", {"data-testid": "ad-price"}).get_text(strip=True) if card.find("p", {"data-testid": "ad-price"}) else "N/A",
-                            "img": card.find("img").get("src") if card.find("img") else None
-                        })
-                return ads
-            except Exception as e:
-                logger.error(f"Ошибка запроса: {e}"); return []
+                # Ищем все блоки объявлений
+                ads = soup.find_all("div", {"data-cy": "l-card"})
+                
+                res = []
+                for ad in ads:
+                    link_tag = ad.find("a")
+                    if not link_tag:
+                        continue
+                    
+                    href = link_tag.get("href")
+                    if not href:
+                        continue
+                        
+                    # Формируем полную ссылку
+                    full_url = href if href.startswith("http") else "https://www.olx.pl" + href
+                    # Убираем параметры отслеживания для чистоты ссылки
+                    clean_url = full_url.split("#")[0].split("?")[0]
+                    res.append(clean_url)
+                
+                return res
+        except Exception as e:
+            print(f"Ошибка при запросе: {e}")
+            return []
 
     async def run(self):
         try:
@@ -112,6 +140,7 @@ class OLXProMonitor:
 if __name__ == "__main__":
 
     asyncio.run(OLXProMonitor().run())
+
 
 
 
