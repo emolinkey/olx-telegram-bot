@@ -1,4 +1,5 @@
 aiogram
 httpx
 beautifulsoup4
+httpx[http2]
 
