@@ -61,7 +61,7 @@ class OLXProMonitor:
             "Upgrade-Insecure-Requests": "1"
         }
         # И строку запуска клиента тоже меняем (ставим False и добавляем headers)
-       async def fetch_ads(self):
+    async def fetch_ads(self):
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
@@ -140,6 +140,7 @@ class OLXProMonitor:
 if __name__ == "__main__":
 
     asyncio.run(OLXProMonitor().run())
+
 
 
 
