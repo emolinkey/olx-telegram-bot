@@ -19,8 +19,8 @@ def run_flask():
     app.run(host='0.0.0.0', port=port)
 # ------------------------------
 
-TOKEN = os.environ.get("8346602599:AAHzl__YrzL5--4a7enN02PlXLkjRxeD-z8")
-CHAT_ID = os.environ.get("908015235")
+TOKEN = "8346602599:AAHzl__YrzL5--4a7enN02PlXLkjRxeD-z8"
+CHAT_ID = "908015235"
 OLX_URL = "https://www.olx.pl/elektronika/komputery/podzespoly-i-czesci/q-pami%C4%99%C4%87-ram-ddr4-8gb/?search%5Border%5D=created_at:desc&search%5Bfilter_float_price:from%5D=100&search%5Bfilter_float_price:to%5D=300" # Подставь сюда свою ссылку!
 
 class OLXProMonitor:
@@ -69,6 +69,7 @@ if __name__ == "__main__":
     # Запускаем бота
     monitor = OLXProMonitor()
     asyncio.run(monitor.run())
+
 
 
 
