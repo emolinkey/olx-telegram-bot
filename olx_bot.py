@@ -141,6 +141,29 @@ if __name__ == "__main__":
 
     asyncio.run(OLXProMonitor().run())
 
+import threading
+from flask import Flask
+
+app = Flask('')
+
+@app.route('/')
+def home():
+    return "I am alive"
+
+def run_flask():
+    app.run(host='0.0.0.0', port=10000)
+
+# Запускаем "сайт" в отдельном потоке, чтобы он не мешал боту
+if __name__ == "__main__":
+    t = threading.Thread(target=run_flask)
+    t.start()
+    
+    # Тут запускается твой основной бот
+    import asyncio
+    monitor = OLXProMonitor()
+    asyncio.run(monitor.run())
+
+
 
 
 
