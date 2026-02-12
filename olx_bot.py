@@ -7,7 +7,7 @@ from flask import Flask
 import threading
 
 # --- КОНФИГ ---
-TOKEN = "8346602599:AAHzl__YrzL5--4a7enN02PlXLkjRxeD-z8"
+TOKEN = "8346602599:AAFj8lQ_cfMwBXIfOSl7SbA9J7qixcpaO68"
 CHAT_ID = "908015235"
 OLX_URL = "https://www.olx.pl/elektronika/komputery/podzespoly-i-czesci/q-pami%C4%99%C4%87-ram-ddr4-8gb/?search%5Border%5D=created_at:desc&search%5Bfilter_float_price:from%5D=100&search%5Bfilter_float_price:to%5D=300"
 PROXY = "http://nyntgqyu:2c5wo0xukywv@31.59.20.176:6754/"
@@ -80,3 +80,4 @@ class OLXProMonitor:
 if __name__ == "__main__":
     monitor = OLXProMonitor()
     asyncio.run(monitor.run())
+
