@@ -36,7 +36,7 @@ class OLXProMonitor:
             "Accept-Language": "pl-PL,pl;q=0.9",
         }
         # ИСПРАВЛЕНО: используем 'proxy' вместо 'proxies' для совместимости
-        self.client = httpx.AsyncClient(proxy=PROXY_URL, headers=headers, timeout=30.0, follow_redirects=True)
+        self.client = httpx.AsyncClient(headers=headers, timeout=30.0, follow_redirects=True)
 
     async def fetch_ads(self):
         try:
@@ -95,3 +95,4 @@ class OLXProMonitor:
 if __name__ == "__main__":
     monitor = OLXProMonitor()
     asyncio.run(monitor.run())
+
