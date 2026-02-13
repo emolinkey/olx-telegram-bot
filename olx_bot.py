@@ -5,17 +5,18 @@ from bs4 import BeautifulSoup
 from aiogram import Bot
 from flask import Flask
 import threading
+import random
 
 # --- КОНФИГ ---
-TOKEN = "8346602599:AAFj8lQ_cfMwBXIfOSl7SbA9J7qixcpaO68"
+TOKEN = "8346602599:AAHzl__YrzL5--4a7enN02PlXLkjRxeD-z8"
 CHAT_ID = "908015235"
-OLX_URL = "https://www.olx.pl/elektronika/komputery/podzespoly-i-czesci/q-pami%C4%99%C4%87-ram-ddr4-8gb/?search%5Border%5D=created_at:desc&search%5Bfilter_float_price:from%5D=100&search%5Bfilter_float_price:to%5D=300"
+OLX_URL = "https://www.olx.pl/oferty/q-pami%C4%99%C4%87-ram-ddr4-8gb/?search%5Border%5D=created_at:desc&search%5Bfilter_float_price:from%5D=100&search%5Bfilter_float_price:to%5D=250"
 PROXY = "http://nyntgqyu:2c5wo0xukywv@31.59.20.176:6754/"
 
 # --- ВЕБ-СЕРВЕР ---
 app = Flask('')
 @app.route('/')
-def home(): return "Бот работает!"
+def home(): return "SYSTEM ONLINE"
 
 def run_flask():
     port = int(os.environ.get("PORT", 10000))
@@ -26,58 +27,73 @@ class OLXProMonitor:
     def __init__(self):
         self.bot = Bot(token=TOKEN)
         self.seen_ads = set()
+        self.client = None
+
+    async def init_client(self):
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+            "Accept-Language": "pl-PL,pl;q=0.9",
+            "Connection": "keep-alive",
+            "Upgrade-Insecure-Requests": "1"
+        }
+        self.client = httpx.AsyncClient(proxies=PROXY, headers=headers, timeout=30.0, follow_redirects=True)
 
     async def fetch_ads(self):
-        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/122.0.0.0 Safari/537.36"}
         try:
-            async with httpx.AsyncClient(proxies=PROXY, headers=headers, timeout=20.0, follow_redirects=True) as client:
-                r = await client.get(OLX_URL)
-                if r.status_code != 200:
-                    # Если ошибка, бот шепнет в ТГ, что его не пускают
-                    print(f"Ошибка OLX: {r.status_code}")
-                    return []
-                
-                soup = BeautifulSoup(r.text, "html.parser")
-                found = []
-                for a in soup.find_all("a", href=True):
-                    href = a['href']
-                    if '/d/oferta/' in href:
-                        url = href if href.startswith("http") else "https://www.olx.pl" + href
-                        clean = url.split("#")[0].split("?")[0]
-                        if clean not in found: found.append(clean)
-                return found
+            # Сначала "прогреваем" сессию, заходя на главную (если это первый раз)
+            if not self.client: await self.init_client()
+            
+            r = await self.client.get(OLX_URL)
+            print(f"Проверка OLX... Статус: {r.status_code}")
+            
+            if r.status_code == 403:
+                print("ОЙ! OLX нас заблокировал (403). Пробую пересоздать сессию...")
+                await self.init_client()
+                return []
+
+            soup = BeautifulSoup(r.text, "html.parser")
+            found = []
+            
+            # Ищем ссылки на объявления по всем возможным признакам
+            for a in soup.find_all("a", href=True):
+                href = a['href']
+                if '/d/oferta/' in href:
+                    url = href if href.startswith("http") else "https://www.olx.pl" + href
+                    clean = url.split("#")[0].split("?")[0].rstrip('/')
+                    if clean not in found: found.append(clean)
+            
+            return found
         except Exception as e:
-            print(f"Ошибка сети: {e}")
+            print(f"Ошибка парсинга: {e}")
             return []
 
     async def run(self):
-        # Запускаем веб-сервер внутри асинхронного цикла
         threading.Thread(target=run_flask, daemon=True).start()
+        print("!!! БОТ СТАРТОВАЛ !!!")
         
-        print("!!! СТАРТ МОНИТОРИНГА !!!")
-        try:
-            await self.bot.send_message(CHAT_ID, "✅ Бот успешно запущен на Render и начинает поиск!")
-        except Exception as e:
-            print(f"Ошибка ТГ: {e}")
+        # Сразу скажем тебе в ТГ, что мы начали
+        await self.bot.send_message(CHAT_ID, "🔎 Начинаю активную охоту на RAM DDR4...")
 
         while True:
             ads = await self.fetch_ads()
             print(f"Найдено объявлений: {len(ads)}")
             
-            # Если бот вообще ничего не видит, возможно, прокси забанен
-            if not ads and self.seen_ads:
-                # Мы не спамим, просто пишем в консоль
-                print("Предупреждение: не найдено ни одного объявления. Проверь прокси.")
-
-            for ad in ads:
-                if ad not in self.seen_ads:
-                    if self.seen_ads: # Отправляем только новые
-                        await self.bot.send_message(CHAT_ID, f"🆕 **НОВОЕ ОБЪЯВЛЕНИЕ!**\n\n{ad}")
-                    self.seen_ads.add(ad)
+            if len(ads) > 0:
+                # При первом запуске просто запоминаем, при следующих - присылаем новые
+                if not self.seen_ads:
+                    self.seen_ads.update(ads)
+                    print(f"База инициализирована: {len(ads)} шт.")
+                    # Чтобы ты видел, что бот реально что-то нашел:
+                    await self.bot.send_message(CHAT_ID, f"✅ Вижу текущие объявления ({len(ads)} шт). Жду появления новых!")
+                else:
+                    for ad in ads:
+                        if ad not in self.seen_ads:
+                            self.seen_ads.add(ad)
+                            await self.bot.send_message(CHAT_ID, f"🆕 **НАШЕЛ НОВОЕ!**\n\n{ad}")
             
-            await asyncio.sleep(180) # Проверка каждые 3 минуты
+            # Ждем 3-4 минуты (случайно, чтобы не спалиться)
+            await asyncio.sleep(random.randint(180, 240))
 
 if __name__ == "__main__":
-    monitor = OLXProMonitor()
-    asyncio.run(monitor.run())
-
+    asyncio.run(OLXProMonitor().run())
