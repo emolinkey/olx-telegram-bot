@@ -1,6 +1,6 @@
 import os
 import asyncio
-from curl_cffi.requests import AsyncSession
+import cloudscraper
 from bs4 import BeautifulSoup
 from aiogram import Bot
 from flask import Flask
@@ -8,7 +8,6 @@ import threading
 import random
 import sys
 import json
-import re
 
 # --- КОНФИГ ---
 TOKEN = "8346602599:AAFj8lQ_cfMwBXIfOSl7SbA9J7qixcpaO68"
@@ -17,6 +16,10 @@ OLX_URL = "https://www.olx.pl/elektronika/komputery/podzespoly-i-czesci/q-pami%C
 
 # --- ПРОКСИ ---
 PROXY = "http://nyntgqyu:2c5wo0xukywv@64.137.96.74:6641"
+PROXIES = {
+    "http": PROXY,
+    "https": PROXY
+}
 
 # --- ВЕБ-СЕРВЕР ---
 app = Flask('')
@@ -34,128 +37,156 @@ class OLXProMonitor:
     def __init__(self):
         self.bot = Bot(token=TOKEN)
         self.seen_ads = set()
+        self.scraper = None
 
-    async def fetch_ads(self):
+    def create_scraper(self):
+        self.scraper = cloudscraper.create_scraper(
+            browser={
+                'browser': 'chrome',
+                'platform': 'windows',
+                'desktop': True
+            },
+            delay=5
+        )
+        self.scraper.proxies = PROXIES
+        self.scraper.headers.update({
+            "Accept-Language": "pl-PL,pl;q=0.9,en-US;q=0.8,en;q=0.7",
+            "Referer": "https://www.google.com/",
+        })
+        print("✅ Scraper создан (Chrome имитация + прокси)")
+        sys.stdout.flush()
+
+    def fetch_ads_sync(self):
         try:
-            await asyncio.sleep(random.uniform(2, 5))
+            if not self.scraper:
+                self.create_scraper()
 
-            async with AsyncSession(
-                impersonate="chrome120",
-                proxy=PROXY,
-                timeout=30
-            ) as session:
+            # Сначала заходим на главную — получаем cookies
+            print("🌐 Захожу на главную OLX...")
+            sys.stdout.flush()
 
-                # Сначала заходим на главную — получаем cookies
-                print("🌐 Захожу на главную OLX...")
-                sys.stdout.flush()
-                await session.get("https://www.olx.pl/", impersonate="chrome120")
-                await asyncio.sleep(random.uniform(1, 3))
+            try:
+                self.scraper.get("https://www.olx.pl/", timeout=30)
+                import time
+                time.sleep(random.uniform(2, 4))
+            except Exception as e:
+                print(f"⚠️ Главная страница: {e}")
 
-                # Теперь запрашиваем страницу с объявлениями
-                print("🔍 Запрашиваю объявления...")
-                sys.stdout.flush()
-                r = await session.get(OLX_URL, impersonate="chrome120")
-                print(f"📡 Статус: {r.status_code}")
-                sys.stdout.flush()
+            # Запрашиваем объявления
+            print("🔍 Запрашиваю объявления...")
+            sys.stdout.flush()
 
-                if r.status_code != 200:
-                    print(f"❌ Ошибка: статус {r.status_code}")
-                    return []
+            r = self.scraper.get(OLX_URL, timeout=30)
+            print(f"📡 Статус: {r.status_code}")
+            sys.stdout.flush()
 
-                soup = BeautifulSoup(r.text, "html.parser")
-                ads = []
+            if r.status_code == 403:
+                print("❌ 403 — пересоздаю scraper...")
+                self.scraper = None
+                return []
 
-                # === МЕТОД 1: __NEXT_DATA__ (самый надёжный) ===
-                next_data = soup.find("script", {"id": "__NEXT_DATA__"})
-                if next_data:
-                    try:
-                        data = json.loads(next_data.string)
-                        ads = self.parse_next_data(data)
-                        if ads:
-                            print(f"✅ [NEXT_DATA] Найдено: {len(ads)}")
-                            return ads
-                    except Exception as e:
-                        print(f"⚠️ [NEXT_DATA] Ошибка: {e}")
+            if r.status_code != 200:
+                print(f"❌ Статус: {r.status_code}")
+                return []
 
-                # === МЕТОД 2: JSON в script тегах ===
-                for script in soup.find_all("script", {"type": "application/json"}):
-                    try:
+            soup = BeautifulSoup(r.text, "html.parser")
+            ads = []
+
+            # === МЕТОД 1: __NEXT_DATA__ ===
+            next_data = soup.find("script", {"id": "__NEXT_DATA__"})
+            if next_data and next_data.string:
+                try:
+                    data = json.loads(next_data.string)
+                    ads = self.parse_next_data(data)
+                    if ads:
+                        print(f"✅ [NEXT_DATA] Найдено: {len(ads)}")
+                        return ads
+                except Exception as e:
+                    print(f"⚠️ [NEXT_DATA] Ошибка: {e}")
+
+            # === МЕТОД 2: JSON в script тегах ===
+            for script in soup.find_all("script", {"type": "application/json"}):
+                try:
+                    if script.string:
                         data = json.loads(script.string)
                         found = self.deep_search(data)
                         if found:
                             print(f"✅ [JSON] Найдено: {len(found)}")
                             return found
-                    except:
-                        continue
+                except:
+                    continue
 
-                # === МЕТОД 3: data-cy карточки ===
-                cards = soup.find_all("div", {"data-cy": "l-card"})
-                print(f"📋 [HTML] Карточек: {len(cards)}")
+            # === МЕТОД 3: data-cy карточки ===
+            cards = soup.find_all("div", {"data-cy": "l-card"})
+            print(f"📋 [HTML] Карточек data-cy: {len(cards)}")
 
-                for card in cards:
-                    link = card.find("a", href=True)
-                    if link and '/d/oferta/' in link.get('href', ''):
-                        href = link['href']
-                        url = href if href.startswith("http") else "https://www.olx.pl" + href
-                        clean = url.split("#")[0].split("?")[0].rstrip('/')
+            for card in cards:
+                link = card.find("a", href=True)
+                if link and '/d/oferta/' in link.get('href', ''):
+                    href = link['href']
+                    url = href if href.startswith("http") else "https://www.olx.pl" + href
+                    clean = url.split("#")[0].split("?")[0].rstrip('/')
 
-                        title_el = card.find("h6") or card.find("h4") or card.find("h3")
-                        title = title_el.get_text(strip=True) if title_el else "Без названия"
+                    title_el = card.find("h6") or card.find("h4") or card.find("h3")
+                    title = title_el.get_text(strip=True) if title_el else "Без названия"
 
-                        price_el = card.find("p", {"data-testid": "ad-price"})
-                        price = price_el.get_text(strip=True) if price_el else "?"
+                    price_el = card.find("p", {"data-testid": "ad-price"})
+                    price = price_el.get_text(strip=True) if price_el else "?"
 
-                        ads.append({
-                            "title": title,
-                            "url": clean,
-                            "price": price
-                        })
+                    ads.append({
+                        "title": title,
+                        "url": clean,
+                        "price": price
+                    })
 
-                if ads:
-                    return ads
-
-                # === МЕТОД 4: все ссылки /d/oferta/ ===
-                seen = set()
-                for a in soup.find_all("a", href=True):
-                    href = a['href']
-                    if '/d/oferta/' in href:
-                        url = href if href.startswith("http") else "https://www.olx.pl" + href
-                        clean = url.split("#")[0].split("?")[0].rstrip('/')
-                        if clean not in seen:
-                            seen.add(clean)
-                            ads.append({
-                                "title": a.get_text(strip=True)[:100] or "Без названия",
-                                "url": clean,
-                                "price": "?"
-                            })
-
-                print(f"📋 [LINKS] Найдено: {len(ads)}")
-
-                # Если вообще ничего — сохраняем HTML для дебага
-                if not ads:
-                    preview = r.text[:500]
-                    print(f"⚠️ Страница пустая. Превью:\n{preview}")
-
+            if ads:
+                print(f"✅ [HTML cards] Найдено: {len(ads)}")
                 return ads
 
+            # === МЕТОД 4: все ссылки /d/oferta/ ===
+            seen = set()
+            for a in soup.find_all("a", href=True):
+                href = a['href']
+                if '/d/oferta/' in href:
+                    url = href if href.startswith("http") else "https://www.olx.pl" + href
+                    clean = url.split("#")[0].split("?")[0].rstrip('/')
+                    if clean not in seen:
+                        seen.add(clean)
+                        text = a.get_text(strip=True)[:100]
+                        ads.append({
+                            "title": text if text else "Без названия",
+                            "url": clean,
+                            "price": "?"
+                        })
+
+            if ads:
+                print(f"✅ [LINKS] Найдено: {len(ads)}")
+            else:
+                # Дебаг — показываем начало страницы
+                text_preview = soup.get_text()[:300].strip()
+                print(f"⚠️ Ничего не найдено. Текст страницы:\n{text_preview}")
+
+            return ads
+
         except Exception as e:
-            print(f"❌ Ошибка парсинга: {e}")
+            print(f"❌ Ошибка: {e}")
             sys.stdout.flush()
+            self.scraper = None
             return []
 
     def parse_next_data(self, data):
-        """Парсим __NEXT_DATA__ от Next.js"""
         ads = []
         try:
             props = data.get("props", {}).get("pageProps", {})
 
-            # Ищем объявления в разных местах структуры
             items = []
 
             # Путь 1
             listing = props.get("listing", {})
             if isinstance(listing, dict):
-                items = listing.get("listing", {}).get("ads", [])
+                inner = listing.get("listing", {})
+                if isinstance(inner, dict):
+                    items = inner.get("ads", [])
 
             # Путь 2
             if not items:
@@ -163,11 +194,11 @@ class OLXProMonitor:
 
             # Путь 3
             if not items:
-                data_field = props.get("data", {})
-                if isinstance(data_field, dict):
-                    items = data_field.get("ads", [])
+                d = props.get("data", {})
+                if isinstance(d, dict):
+                    items = d.get("ads", [])
 
-            # Путь 4 — рекурсивный поиск
+            # Путь 4 — глубокий поиск
             if not items:
                 return self.deep_search(data)
 
@@ -182,12 +213,12 @@ class OLXProMonitor:
                 title = item.get("title", "Без названия")
 
                 price = "?"
-                price_data = item.get("price", {})
-                if isinstance(price_data, dict):
-                    price = price_data.get("displayValue",
-                            price_data.get("regularPrice", {}).get("displayValue", "?"))
-                elif price_data:
-                    price = str(price_data)
+                pd = item.get("price", {})
+                if isinstance(pd, dict):
+                    price = pd.get("displayValue",
+                            pd.get("regularPrice", {}).get("displayValue", "?"))
+                elif pd:
+                    price = str(pd)
 
                 ads.append({
                     "title": title,
@@ -196,12 +227,11 @@ class OLXProMonitor:
                 })
 
         except Exception as e:
-            print(f"⚠️ parse_next_data ошибка: {e}")
+            print(f"⚠️ parse_next_data: {e}")
 
         return ads
 
     def deep_search(self, data, results=None):
-        """Рекурсивно ищем объявления в любой JSON структуре"""
         if results is None:
             results = []
 
@@ -218,7 +248,8 @@ class OLXProMonitor:
                 if isinstance(p, dict):
                     price = p.get("displayValue", "?")
 
-                if clean not in [r["url"] for r in results]:
+                existing_urls = [r["url"] for r in results]
+                if clean not in existing_urls:
                     results.append({
                         "title": title,
                         "url": clean,
@@ -245,9 +276,9 @@ class OLXProMonitor:
     async def run(self):
         threading.Thread(target=run_flask, daemon=True).start()
         print("=" * 50)
-        print("🚀 БОТ СТАРТОВАЛ (curl_cffi + прокси)")
-        print(f"🌐 Прокси: Испания")
-        print(f"🔒 TLS: имитация Chrome 120")
+        print("🚀 БОТ СТАРТОВАЛ")
+        print("🔒 Движок: cloudscraper (Chrome)")
+        print("🌐 Прокси: Испания")
         print("=" * 50)
         sys.stdout.flush()
 
@@ -255,8 +286,8 @@ class OLXProMonitor:
             await self.bot.send_message(
                 CHAT_ID,
                 "✅ Мониторинг запущен!\n"
+                "🔒 Движок: cloudscraper\n"
                 "🌐 Прокси: Испания\n"
-                "🔒 Режим: Chrome имитация\n"
                 "🔄 Проверка каждые 5-7 минут"
             )
         except Exception as e:
@@ -266,8 +297,11 @@ class OLXProMonitor:
 
         while True:
             try:
-                ads = await self.fetch_ads()
-                print(f"📊 Всего объявлений: {len(ads)}")
+                # cloudscraper синхронный — запускаем в потоке
+                loop = asyncio.get_event_loop()
+                ads = await loop.run_in_executor(None, self.fetch_ads_sync)
+
+                print(f"📊 Всего: {len(ads)}")
                 sys.stdout.flush()
 
                 if ads:
@@ -295,7 +329,7 @@ class OLXProMonitor:
                                     )
                                     await asyncio.sleep(1)
                                 except Exception as e:
-                                    print(f"❌ Ошибка отправки: {e}")
+                                    print(f"❌ Отправка: {e}")
 
                         if new_count:
                             print(f"🆕 Новых: {new_count}")
@@ -307,17 +341,22 @@ class OLXProMonitor:
 
                     if fail_count >= 5:
                         fail_count = 0
-                        await self.bot.send_message(
-                            CHAT_ID,
-                            "⚠️ 5 неудачных попыток подряд.\n"
-                            "Возможно прокси умер или OLX сменил защиту."
-                        )
+                        self.scraper = None
+                        try:
+                            await self.bot.send_message(
+                                CHAT_ID,
+                                "⚠️ 5 неудач подряд.\n"
+                                "Пересоздаю scraper..."
+                            )
+                        except:
+                            pass
 
                 sys.stdout.flush()
 
             except Exception as e:
                 print(f"❌ Критическая ошибка: {e}")
                 sys.stdout.flush()
+                self.scraper = None
 
             delay = random.randint(300, 420)
             print(f"⏳ Следующая через {delay // 60}м {delay % 60}с")
