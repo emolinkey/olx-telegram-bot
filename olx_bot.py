@@ -10,7 +10,7 @@ import sys
 import json
 
 # --- КОНФИГ ---
-TOKEN = "8346602599:AAFj8lQ_cfMwBXIfOSl7SbA9J7qixcpaO68"
+TOKEN = "8346602599:AAGXzaXb6GxpAjK6EtbDqSLHfGC1I6mIE1c"
 CHAT_ID = "908015235"
 OLX_URL = "https://www.olx.pl/elektronika/komputery/podzespoly-i-czesci/q-pami%C4%99%C4%87-ram-ddr4-8gb/?search%5Bfilter_float_price%3Afrom%5D=100&search%5Bfilter_float_price%3Ato%5D=250&search%5Border%5D=created_at%3Adesc"
 
@@ -406,3 +406,4 @@ class OLXProMonitor:
 if __name__ == "__main__":
     monitor = OLXProMonitor()
     asyncio.run(monitor.run())
+
