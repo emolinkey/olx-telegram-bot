@@ -4,7 +4,6 @@ from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from flask import Flask
 
-# --- КОНФИГУРАЦИЯ ---
 TOKEN = "8346602599:AAEauikfQJCI_cyZK5hiv3W0StWk9OMWPK0"
 ADMIN_ID = 908015235
 
@@ -16,29 +15,34 @@ class Config:
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("OLX_Sniper_Pro")
 
-# --- ВЕБ-СЕРВЕР ---
 app = Flask('')
 @app.route('/')
-def home(): return "<h1>OLX Sniper Pro: Online</h1>"
+def home(): return "Бот работает"
 
 def run_flask():
     port = int(os.environ.get("PORT", 10000))
     app.run(host='0.0.0.0', port=port)
 
-# --- ПАРСЕР ---
 class OLXParser:
     def __init__(self):
         self.seen_ads = set()
 
     async def fetch(self):
+        # Улучшенные заголовки для обхода 403 ошибки
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+            "Accept-Language": "pl-PL,pl;q=0.9,en-US;q=0.8,en;q=0.7",
             "Accept-Encoding": "gzip, deflate, br",
-            "Accept-Language": "pl-PL,pl;q=0.9"
+            "Connection": "keep-alive",
+            "Upgrade-Insecure-Requests": "1"
         }
         try:
-            async with httpx.AsyncClient(http2=True, headers=headers, timeout=20.0) as client:
+            # Используем http2=True для имитации реального браузера
+            async with httpx.AsyncClient(http2=True, headers=headers, timeout=30.0, follow_redirects=True) as client:
                 r = await client.get(Config.url)
+                logger.info(f"Статус OLX: {r.status_code}")
+                
                 if r.status_code != 200: return None
                 
                 soup = BeautifulSoup(r.text, "lxml")
@@ -46,60 +50,49 @@ class OLXParser:
                 script = soup.find("script", id="__NEXT_DATA__")
                 if script:
                     data = json.loads(script.string)
+                    # Ищем товары в разных частях JSON (OLX часто меняет их местами)
                     items = data.get("props", {}).get("pageProps", {}).get("data", {}).get("items", [])
+                    if not items:
+                        items = data.get("props", {}).get("pageProps", {}).get("listing", {}).get("listing", {}).get("ads", [])
+                    
                     for item in items:
-                        if item.get("url"):
+                        url = item.get("url")
+                        if url:
                             ads.append({
-                                "url": item["url"].split('#')[0],
-                                "title": item.get("title", "iPhone"),
+                                "url": url.split('#')[0],
+                                "title": item.get("title", "iPhone 13 Pro"),
                                 "price": item.get("price", {}).get("displayValue", "?")
                             })
                 return ads
         except Exception as e:
-            logger.error(f"Ошибка сети: {e}")
+            logger.error(f"Ошибка парсинга: {e}")
             return None
 
-# --- ГЛАВНАЯ ЛОГИКА ---
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 parser = OLXParser()
 
 async def monitoring():
-    # Ждем 5 секунд, чтобы Render завершил старые процессы
-    await asyncio.sleep(5)
-    logger.info("Мониторинг запущен")
-    
+    await asyncio.sleep(10) # Пауза для закрытия старых копий
     while True:
         if Config.is_running:
             ads = await parser.fetch()
             if ads:
                 if not parser.seen_ads:
                     parser.seen_ads.update([a['url'] for a in ads])
-                    logger.info(f"База создана: {len(ads)} объявлений")
+                    logger.info(f"База создана: {len(ads)} шт.")
                 else:
                     for ad in ads:
                         if ad['url'] not in parser.seen_ads:
                             parser.seen_ads.add(ad['url'])
-                            msg = f"🔥 **НАЙДЕНО НОВОЕ ПРЕДЛОЖЕНИЕ!**\n\n📱 **{ad['title']}**\n💰 Цена: `{ad['price']}`\n\n🔗 [ОТКРЫТЬ НА OLX]({ad['url']})"
+                            msg = f"🆕 **НОВОЕ!**\n\n📱 {ad['title']}\n💰 Цена: {ad['price']}\n🔗 [Открыть]({ad['url']})"
                             await bot.send_message(ADMIN_ID, msg, parse_mode="Markdown")
-            
-            await asyncio.sleep(Config.interval + random.randint(5, 30))
+            await asyncio.sleep(Config.interval + random.randint(10, 50))
         else:
             await asyncio.sleep(10)
 
-@dp.message(Command("start"))
-async def start(m: types.Message):
-    if m.from_user.id == ADMIN_ID:
-        await m.answer("✅ **OLX Sniper Pro активен!**\n\nИспользуйте `/status` для проверки настроек.")
-
-@dp.message(Command("status"))
-async def status(m: types.Message):
-    if m.from_user.id == ADMIN_ID:
-        mode = "🟢 Активен" if Config.is_running else "🔴 На паузе"
-        await m.answer(f"📊 **Текущий статус:**\n\nСостояние: {mode}\nВ базе: {len(parser.seen_ads)} объявлений\nИнтервал: {Config.interval} сек.")
-
 async def start_app():
-    # КЛЮЧЕВОЙ МОМЕНТ: Удаляем старые подключения, чтобы не было красных логов
+    # Эта команда убивает конфликт (красные логи)
     await bot.delete_webhook(drop_pending_updates=True)
     threading.Thread(target=run_flask, daemon=True).start()
     await asyncio.gather(dp.start_polling(bot), monitoring())
