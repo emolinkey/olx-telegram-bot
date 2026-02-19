@@ -1,125 +1,171 @@
-import os
-import asyncio
-import httpx
+import os, asyncio, httpx, random, sys, json, threading, logging
 from bs4 import BeautifulSoup
-from aiogram import Bot
+from aiogram import Bot, Dispatcher, types
+from aiogram.filters import Command
 from flask import Flask
-import threading
-import random
-import sys
-import json
 
-# --- КОНФИГ ---
-TOKEN = "8346602599:AAEauikfQJCI_cyZK5hiv3W0StWk9OMWPK0"
-CHAT_ID = "908015235"
-OLX_URL = "https://www.olx.pl/elektronika/komputery/podzespoly-i-czesci/q-pami%C4%99%C4%87-ram-ddr4-8gb/?search%5Bfilter_float_price%3Afrom%5D=100&search%5Bfilter_float_price%3Ato%5D=250&search%5Border%5D=created_at%3Adesc"
+# --- НАСТРОЙКИ (Клиент сможет менять их сам через команды) ---
+TOKEN = "8346602599:AAGCJ4Lz0hLuwTyF4FSU21Q6Jh6as9ggtKg"
+ADMIN_ID = 908015235 # Твой ID
+
+class Config:
+    url = "https://www.olx.pl/elektronika/telefony/q-iphone-13-pro/?search%5Border%5D=created_at:desc&search%5Bfilter_float_price:from%5D=500&search%5Bfilter_float_price:to%5D=1500"
+    interval = 300 # секунд (5 минут)
+    is_running = True
+
+# --- ЛОГИРОВАНИЕ ---
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("OLX_Sniper")
 
 # --- ВЕБ-СЕРВЕР ДЛЯ RENDER ---
 app = Flask('')
 @app.route('/')
-def home(): return "БОТ РАБОТАЕТ"
+def home(): return "<h1>OLX Sniper Pro is Active</h1>"
 
 def run_flask():
     port = int(os.environ.get("PORT", 10000))
     app.run(host='0.0.0.0', port=port)
 
-# --- МОНИТОР ---
-class OLXProMonitor:
-    def __init__(self):
-        self.bot = Bot(token=TOKEN)
+# --- ОСНОВНОЙ ДВИЖОК ПАРСИНГА ---
+class OLXSniper:
+    def __init__(self, bot: Bot):
+        self.bot = bot
         self.seen_ads = set()
         self.client = None
+        self.user_agents = [
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+        ]
 
-    async def init_client(self):
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-            "Accept-Language": "pl-PL,pl;q=0.9",
-            "Accept-Encoding": "gzip, deflate, br",
-            "Connection": "keep-alive",
-        }
-        # ИСПРАВЛЕНО: Убрали 'proxies', работаем напрямую через HTTP/2
-        self.client = httpx.AsyncClient(headers=headers, timeout=30.0, follow_redirects=True, http2=True)
+    async def get_client(self):
+        if self.client: await self.client.aclose()
+        self.client = httpx.AsyncClient(
+            http2=True,
+            headers={
+                "User-Agent": random.choice(self.user_agents),
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+                "Accept-Language": "pl-PL,pl;q=0.9,en-US;q=0.8,en;q=0.7",
+                "Accept-Encoding": "gzip, deflate, br",
+            },
+            timeout=20.0,
+            follow_redirects=True
+        )
+        return self.client
 
-    async def fetch_ads(self):
+    async def scrape(self):
         try:
-            if not self.client: await self.init_client()
+            client = await self.get_client()
+            response = await client.get(Config.url)
             
-            # Рандомная пауза, чтобы не злить OLX
-            await asyncio.sleep(random.uniform(2, 5))
+            if response.status_code == 403:
+                logger.warning("🚫 Доступ заблокирован (403). Меняю тактику...")
+                return "BAN"
             
-            r = await self.client.get(OLX_URL)
-            print(f"📡 Статус: {r.status_code}")
-            sys.stdout.flush()
+            if response.status_code != 200: return []
 
-            if r.status_code != 200:
-                print(f"⚠️ Ошибка доступа: {r.status_code}")
-                if r.status_code == 403:
-                    await self.client.aclose()
-                    self.client = None # Сброс сессии при бане
-                return []
+            soup = BeautifulSoup(response.text, "lxml")
+            ads = []
 
-            soup = BeautifulSoup(r.text, "html.parser")
-            found = []
-
-            # Ищем данные в скрытом JSON (самый точный метод)
-            script = soup.find("script", {"id": "__NEXT_DATA__"})
-            if script and script.string:
-                try:
-                    data = json.loads(script.string)
-                    items = data.get("props", {}).get("pageProps", {}).get("data", {}).get("items", [])
-                    if not items:
-                        items = data.get("props", {}).get("pageProps", {}).get("listing", {}).get("listing", {}).get("ads", [])
-                    
-                    for item in items:
-                        url = item.get("url")
-                        if url:
-                            clean = url.split("#")[0].split("?")[0].rstrip('/')
-                            title = item.get("title", "RAM DDR4")
-                            price = item.get("price", {}).get("displayValue", "?")
-                            found.append({"title": title, "url": clean, "price": price})
-                except: pass
-
-            # Если JSON пуст, ищем по ссылкам
-            if not found:
-                for a in soup.find_all("a", href=True):
-                    if '/d/oferta/' in a['href']:
-                        u = a['href'] if a['href'].startswith("http") else "https://www.olx.pl" + a['href']
-                        clean = u.split("#")[0].split("?")[0].rstrip('/')
-                        if not any(f['url'] == clean for f in found):
-                            found.append({"title": "Объявление", "url": clean, "price": "Проверь цену"})
+            # 1. Попытка через JSON (самый быстрый и точный метод)
+            script = soup.find("script", id="__NEXT_DATA__")
+            if script:
+                data = json.loads(script.string)
+                items = data.get("props", {}).get("pageProps", {}).get("data", {}).get("items", [])
+                for item in items:
+                    if item.get("url"):
+                        ads.append({
+                            "url": item["url"].split('#')[0],
+                            "title": item.get("title", "Без названия"),
+                            "price": item.get("price", {}).get("displayValue", "Цена не указана")
+                        })
             
-            return found
+            # 2. Запасной вариант (парсинг HTML)
+            if not ads:
+                for card in soup.select('div[data-cy="l-card"]'):
+                    link = card.select_one('a[href*="/d/oferta/"]')
+                    if link:
+                        ads.append({
+                            "url": "https://www.olx.pl" + link['href'].split('#')[0] if not link['href'].startswith('http') else link['href'].split('#')[0],
+                            "title": card.select_one('h6').text if card.select_one('h6') else "OLX Объявление",
+                            "price": card.select_one('p[data-testid="ad-price"]').text if card.select_one('p[data-testid="ad-price"]') else "---"
+                        })
+            return ads
         except Exception as e:
-            print(f"❌ Ошибка при парсинге: {e}")
+            logger.error(f"Ошибка парсинга: {e}")
             return []
 
-    async def run(self):
-        threading.Thread(target=run_flask, daemon=True).start()
-        print("!!! БОТ СТАРТОВАЛ !!!")
-        sys.stdout.flush()
-        
-        try:
-            await self.bot.send_message(CHAT_ID, "🚀 Бот запущен! Исправлена ошибка с 'proxies'. Начинаю поиск...")
-        except: pass
+async def main_loop(bot: Bot, sniper: OLXSniper):
+    await bot.send_message(ADMIN_ID, "✅ **Система OLX Sniper Pro запущена!**\nНачинаю мониторинг...")
+    
+    while True:
+        if Config.is_running:
+            result = await sniper.scrape()
+            
+            if result == "BAN":
+                await bot.send_message(ADMIN_ID, "⚠️ **Внимание:** OLX временно ограничил доступ. Сплю 15 минут для обхода защиты.")
+                await asyncio.sleep(900)
+                continue
 
-        while True:
-            ads = await self.fetch_ads()
-            print(f"🔎 Найдено: {len(ads)} шт.")
-            sys.stdout.flush()
-            
-            if ads:
-                if not self.seen_ads:
-                    self.seen_ads.update([ad['url'] for ad in ads])
-                    await self.bot.send_message(CHAT_ID, f"📡 База создана ({len(ads)} шт). Жду новые объявления!")
+            if result:
+                # Если это первый запуск — просто запоминаем базу
+                if not sniper.seen_ads:
+                    sniper.seen_ads.update([a['url'] for a in result])
+                    await bot.send_message(ADMIN_ID, f"📊 База собрана: {len(result)} объявлений.")
                 else:
-                    for ad in ads:
-                        if ad['url'] not in self.seen_ads:
-                            self.seen_ads.add(ad['url'])
-                            msg = f"🆕 **НАШЕЛ НОВОЕ!**\n\n📦 {ad['title']}\n💰 {ad['price']}\n🔗 {ad['url']}"
-                            await self.bot.send_message(CHAT_ID, msg)
-            
-            await asyncio.sleep(random.randint(300, 500))
+                    for ad in result:
+                        if ad['url'] not in sniper.seen_ads:
+                            sniper.seen_ads.add(ad['url'])
+                            text = f"🆕 **НАЙДЕНО НОВОЕ!**\n\n🔹 **{ad['title']}**\n💰 Цена: {ad['price']}\n\n🔗 [ОТКРЫТЬ ОБЪЯВЛЕНИЕ]({ad['url']})"
+                            await bot.send_message(ADMIN_ID, text, parse_mode="Markdown")
+
+            # Рандомная задержка для имитации человека
+            await asyncio.sleep(Config.interval + random.randint(-20, 40))
+        else:
+            await asyncio.sleep(10)
+
+# --- ТЕЛЕГРАМ КОМАНДЫ (Интерфейс для клиента) ---
+bot = Bot(token=TOKEN)
+dp = Dispatcher()
+
+@dp.message(Command("start"))
+async def cmd_start(message: types.Message):
+    if message.from_user.id != ADMIN_ID: return
+    menu = (
+        "🎮 **Управление OLX Sniper Pro**\n\n"
+        "🔗 `/url ССЫЛКА` — изменить ссылку поиска\n"
+        "⏲ `/time МИНУТЫ` — интервал проверки (мин)\n"
+        "⏯ `/toggle` — запуск/пауза бота\n"
+        "📊 `/status` — текущие настройки"
+    )
+    await message.answer(menu, parse_mode="Markdown")
+
+@dp.message(Command("url"))
+async def cmd_url(message: types.Message):
+    new_url = message.text.replace("/url ", "").strip()
+    if "olx.pl" in new_url:
+        Config.url = new_url
+        await message.answer("✅ Ссылка обновлена!")
+    else:
+        await message.answer("❌ Ошибка: Вставьте корректную ссылку на OLX.pl")
+
+@dp.message(Command("status"))
+async def cmd_status(message: types.Message):
+    state = "🟢 Работает" if Config.is_running else "🔴 На паузе"
+    await message.answer(f"ℹ️ **Статус:** {state}\n⏲ **Интервал:** {Config.interval//60} мин\n🔗 **URL:** {Config.url}")
+
+@dp.message(Command("toggle"))
+async def cmd_toggle(message: types.Message):
+    Config.is_running = not Config.is_running
+    await message.answer(f"♻️ Бот {'запущен' if Config.is_running else 'остановлен'}")
+
+async def run_bot():
+    sniper = OLXSniper(bot)
+    # Запускаем мониторинг в фоне
+    asyncio.create_task(main_loop(bot, sniper))
+    # Запускаем обработку команд
+    await dp.start_polling(bot)
 
 if __name__ == "__main__":
-    monitor = OLXProMonitor()
-    asyncio.run(monitor.run())
+    threading.Thread(target=run_flask, daemon=True).start()
+    asyncio.run(run_bot())
