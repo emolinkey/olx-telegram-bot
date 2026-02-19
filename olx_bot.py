@@ -4,6 +4,7 @@ from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from flask import Flask
 
+# --- КОНФИГУРАЦИЯ ---
 TOKEN = "8346602599:AAEauikfQJCI_cyZK5hiv3W0StWk9OMWPK0"
 ADMIN_ID = 908015235
 
@@ -15,6 +16,7 @@ class Config:
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("OLX_Sniper_Pro")
 
+# --- ВЕБ-СЕРВЕР ---
 app = Flask('')
 @app.route('/')
 def home(): return "Бот работает"
@@ -23,12 +25,13 @@ def run_flask():
     port = int(os.environ.get("PORT", 10000))
     app.run(host='0.0.0.0', port=port)
 
+# --- ПАРСЕР ---
 class OLXParser:
     def __init__(self):
         self.seen_ads = set()
 
     async def fetch(self):
-        # Улучшенные заголовки для обхода 403 ошибки
+        # Заголовки для обхода 403 ошибки
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
@@ -38,19 +41,19 @@ class OLXParser:
             "Upgrade-Insecure-Requests": "1"
         }
         try:
-            # Используем http2=True для имитации реального браузера
             async with httpx.AsyncClient(http2=True, headers=headers, timeout=30.0, follow_redirects=True) as client:
                 r = await client.get(Config.url)
                 logger.info(f"Статус OLX: {r.status_code}")
                 
-                if r.status_code != 200: return None
+                if r.status_code != 200: 
+                    return None
                 
                 soup = BeautifulSoup(r.text, "lxml")
                 ads = []
                 script = soup.find("script", id="__NEXT_DATA__")
                 if script:
                     data = json.loads(script.string)
-                    # Ищем товары в разных частях JSON (OLX часто меняет их местами)
+                    # Пробуем достать данные из разных структур JSON
                     items = data.get("props", {}).get("pageProps", {}).get("data", {}).get("items", [])
                     if not items:
                         items = data.get("props", {}).get("pageProps", {}).get("listing", {}).get("listing", {}).get("ads", [])
@@ -68,12 +71,14 @@ class OLXParser:
             logger.error(f"Ошибка парсинга: {e}")
             return None
 
+# --- ЛОГИКА БОТА ---
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 parser = OLXParser()
 
 async def monitoring():
-    await asyncio.sleep(10) # Пауза для закрытия старых копий
+    await asyncio.sleep(10) # Пауза для безопасного старта
+    logger.info("Цикл мониторинга запущен")
     while True:
         if Config.is_running:
             ads = await parser.fetch()
@@ -91,8 +96,13 @@ async def monitoring():
         else:
             await asyncio.sleep(10)
 
+@dp.message(Command("start"))
+async def start(m: types.Message):
+    if m.from_user.id == ADMIN_ID:
+        await m.answer("✅ **OLX Sniper Pro запущен!**")
+
 async def start_app():
-    # Эта команда убивает конфликт (красные логи)
+    # Удаляем старые вебхуки (убирает красные ошибки Conflict)
     await bot.delete_webhook(drop_pending_updates=True)
     threading.Thread(target=run_flask, daemon=True).start()
     await asyncio.gather(dp.start_polling(bot), monitoring())
