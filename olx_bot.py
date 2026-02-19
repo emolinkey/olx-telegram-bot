@@ -5,7 +5,7 @@ from aiogram.filters import Command
 from flask import Flask
 
 # --- КОНФИГУРАЦИЯ ---
-TOKEN = "8346602599:AAEauikfQJCI_cyZK5hiv3W0StWk9OMWPK0"
+TOKEN = "8346602599:AAGCJ4Lz0hLuwTyF4FSU21Q6Jh6as9ggtKg"
 ADMIN_ID = 908015235
 
 class Config:
@@ -109,3 +109,4 @@ async def start_app():
 
 if __name__ == "__main__":
     asyncio.run(start_app())
+
