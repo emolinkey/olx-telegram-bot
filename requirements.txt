@@ -1,5 +1,5 @@
-aiogram==3.2.0
-flask==3.0.0
-beautifulsoup4==4.12.2
-requests==2.31.0
-lxml==5.1.0
+aiogram==3.1.1
+httpx[http2]
+beautifulsoup4
+lxml
+flask
