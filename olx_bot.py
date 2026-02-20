@@ -468,8 +468,14 @@ async def monitoring_loop():
 
 
 async def main():
-    await bot.delete_webhook(drop_pending_updates=True)
+    # Flask сразу — чтобы Render видел порт
     threading.Thread(target=run_flask, daemon=True).start()
+
+    # Ждём 30 сек — пока старая копия умрёт
+    log.info("⏳ Жду 30 сек (убиваю старую копию)...")
+    await asyncio.sleep(30)
+
+    await bot.delete_webhook(drop_pending_updates=True)
     log.info("🚀 OLX SNIPER ЗАПУЩЕН")
     await asyncio.gather(
         dp.start_polling(bot, skip_updates=True),
@@ -479,3 +485,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
