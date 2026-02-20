@@ -468,15 +468,20 @@ async def monitoring_loop():
 
 
 async def main():
-    # Flask сразу — чтобы Render видел порт
     threading.Thread(target=run_flask, daemon=True).start()
 
-    # Ждём 30 сек — пока старая копия умрёт
-    log.info("⏳ Жду 30 сек (убиваю старую копию)...")
-    await asyncio.sleep(30)
+    log.info("⏳ Жду 60 сек (убиваю старую копию)...")
+    await asyncio.sleep(60)
 
     await bot.delete_webhook(drop_pending_updates=True)
+    await asyncio.sleep(5)
+
     log.info("🚀 OLX SNIPER ЗАПУЩЕН")
+
+    # Подавляем Conflict в логах
+    logging.getLogger("aiogram.dispatcher").setLevel(logging.CRITICAL)
+    logging.getLogger("aiogram.event").setLevel(logging.CRITICAL)
+
     await asyncio.gather(
         dp.start_polling(bot, skip_updates=True),
         monitoring_loop()
@@ -485,4 +490,5 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
