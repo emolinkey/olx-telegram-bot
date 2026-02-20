@@ -55,7 +55,7 @@ class OLXParser:
                 "Upgrade-Insecure-Requests": "1",
             }
 
-            async with httpx.AsyncClient(headers=headers, timeout=25, follow_redirects=True, proxy=Config.proxy) as client:
+            async with httpx.AsyncClient(headers=headers, timeout=25, follow_redirects=True, proxies=Config.proxy) as client:
                 try:
                     await client.get("https://www.olx.pl/")
                     await asyncio.sleep(random.uniform(1, 3))
@@ -316,3 +316,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
