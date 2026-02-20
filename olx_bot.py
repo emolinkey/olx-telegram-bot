@@ -18,7 +18,7 @@ from flask import Flask
 #                    КОНФИГУРАЦИЯ
 # ============================================================
 
-TOKEN = "ВСТАВЬ_НОВЫЙ_ТОКЕН"  # ← Замени на новый токен от @BotFather
+TOKEN = "8346602599:AAGOTupvRYymEHnAKzrhvVHDwWjUPyDK80U"  # ← Замени на новый токен от @BotFather
 ADMIN_ID = 908015235
 
 # ============================================================
@@ -533,3 +533,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
