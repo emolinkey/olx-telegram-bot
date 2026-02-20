@@ -294,42 +294,48 @@ async def cmd_stats(msg: types.Message):
 
 
 async def build_base():
-    """Собираем базу с нескольких страниц МОЛЧА"""
-    log.info("📦 Собираю базу...")
+    """Собираем базу с 5 страниц + двойная проверка — МОЛЧА"""
+    log.info("📦 Собираю базу (5 страниц + перепроверка)...")
 
-    # Страница 1
-    ads = await parser.fetch()
-    if ads:
-        for ad in ads:
-            parser.seen_ads.add(ad['url'])
-        log.info(f"   Стр.1: +{len(ads)} (база: {len(parser.seen_ads)})")
-
-    await asyncio.sleep(random.uniform(3, 6))
-
-    # Страница 2
     sep = "&" if "?" in Config.url else "?"
-    ads2 = await parser.fetch(url=Config.url + f"{sep}page=2")
-    if ads2:
-        for ad in ads2:
-            parser.seen_ads.add(ad['url'])
-        log.info(f"   Стр.2: +{len(ads2)} (база: {len(parser.seen_ads)})")
 
-    await asyncio.sleep(random.uniform(3, 6))
+    # Проход 1: страницы 1-5
+    for page in range(1, 6):
+        if page == 1:
+            ads = await parser.fetch()
+        else:
+            ads = await parser.fetch(url=Config.url + f"{sep}page={page}")
 
-    # Страница 3
-    ads3 = await parser.fetch(url=Config.url + f"{sep}page=3")
-    if ads3:
-        for ad in ads3:
-            parser.seen_ads.add(ad['url'])
-        log.info(f"   Стр.3: +{len(ads3)} (база: {len(parser.seen_ads)})")
+        if ads:
+            for ad in ads:
+                parser.seen_ads.add(ad['url'])
+            log.info(f"   Стр.{page}: +{len(ads)} (база: {len(parser.seen_ads)})")
+        else:
+            log.info(f"   Стр.{page}: пусто, стоп")
+            break
 
-    # Делаем вторую проверку страницы 1 через паузу
-    # чтобы поймать объявления которые могли появиться между запросами
-    await asyncio.sleep(random.uniform(2, 4))
-    ads_recheck = await parser.fetch()
-    if ads_recheck:
-        for ad in ads_recheck:
-            parser.seen_ads.add(ad['url'])
+        await asyncio.sleep(random.uniform(3, 6))
+
+    # Проход 2: перепроверяем страницы 1-3
+    log.info("   🔄 Перепроверка страниц 1-3...")
+    await asyncio.sleep(random.uniform(5, 10))
+
+    for page in range(1, 4):
+        if page == 1:
+            ads = await parser.fetch()
+        else:
+            ads = await parser.fetch(url=Config.url + f"{sep}page={page}")
+
+        if ads:
+            new_in_recheck = 0
+            for ad in ads:
+                if ad['url'] not in parser.seen_ads:
+                    parser.seen_ads.add(ad['url'])
+                    new_in_recheck += 1
+            if new_in_recheck:
+                log.info(f"   Перепроверка стр.{page}: +{new_in_recheck} новых")
+        
+        await asyncio.sleep(random.uniform(2, 4))
 
     parser.base_ready = True
     log.info(f"✅ База готова: {len(parser.seen_ads)} объявлений")
@@ -341,12 +347,12 @@ async def monitoring_loop():
 
     # Приветствие
     try:
-        await bot.send_message(ADMIN_ID, "🚀 OLX Sniper запущен!\n⏳ Собираю базу...")
+        await bot.send_message(ADMIN_ID, "🚀 OLX Sniper запущен!\n⏳ Собираю базу (~2 мин)...")
     except Exception as e:
         log.error(f"Telegram: {e}")
         return
 
-    # === СБОР БАЗЫ — НИЧЕГО НЕ ОТПРАВЛЯЕМ ===
+    # СБОР БАЗЫ — ничего не отправляем
     base_count = await build_base()
 
     try:
@@ -359,13 +365,13 @@ async def monitoring_loop():
     except:
         pass
 
-    # === ОСНОВНОЙ ЦИКЛ — ТОЛЬКО НОВЫЕ ===
+    # ОСНОВНОЙ ЦИКЛ — только новые
     while True:
         if not Config.is_running:
             await asyncio.sleep(10)
             continue
 
-        # Если база сброшена (/reset или /url) — собираем заново
+        # Если база сброшена — собираем заново
         if not parser.base_ready:
             try:
                 await bot.send_message(ADMIN_ID, "⏳ Собираю новую базу...")
@@ -378,12 +384,12 @@ async def monitoring_loop():
                 pass
             continue
 
-        # Ждём перед проверкой
+        # Ждём
         delay = Config.interval + random.randint(10, 60)
         log.info(f"⏳ Жду {delay // 60}м {delay % 60}с")
         await asyncio.sleep(delay)
 
-        # Проверяем
+        # Проверяем только страницу 1
         ads = await parser.fetch()
         if not ads:
             log.warning("Не удалось получить данные")
@@ -410,7 +416,7 @@ async def monitoring_loop():
                     log.error(f"Отправка: {e}")
 
         if new_count:
-            log.info(f"🆕 Отправлено новых: {new_count}")
+            log.info(f"🆕 Отправлено: {new_count}")
         else:
             log.info(f"ℹ️ Новых нет (база: {len(parser.seen_ads)})")
 
