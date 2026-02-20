@@ -273,18 +273,42 @@ async def monitoring_loop():
         log.error(f"Telegram: {e}")
         return
 
+    # ПЕРВЫЙ ЗАПУСК: собираем базу БЕЗ отправки
+    log.info("Собираю начальную базу...")
+    first_ads = await parser.fetch()
+    if first_ads:
+        parser.seen_ads.update(a['url'] for a in first_ads)
+        log.info(f"База собрана: {len(first_ads)} объявлений (не отправляю)")
+        try:
+            await bot.send_message(
+                ADMIN_ID,
+                f"📡 База собрана: {len(first_ads)} объявлений\n"
+                f"🔍 Теперь слежу ТОЛЬКО за новыми!"
+            )
+        except:
+            pass
+    else:
+        log.warning("Не удалось собрать базу, попробую позже")
+
+    # ОСНОВНОЙ ЦИКЛ: отправляю только новые
     while True:
         if Config.is_running:
+            delay = Config.interval + random.randint(10, 60)
+            log.info(f"Жду {delay // 60}м {delay % 60}с")
+            await asyncio.sleep(delay)
+
             ads = await parser.fetch()
             if ads:
                 if not parser.seen_ads:
+                    # База пустая (первый сбор не удался) — просто сохраняем
                     parser.seen_ads.update(a['url'] for a in ads)
-                    log.info(f"База: {len(ads)}")
+                    log.info(f"База собрана: {len(ads)}")
                     try:
                         await bot.send_message(ADMIN_ID, f"📡 База: {len(ads)} объявлений")
                     except:
                         pass
                 else:
+                    # Ищем ТОЛЬКО новые
                     for ad in ads:
                         if ad['url'] not in parser.seen_ads:
                             parser.seen_ads.add(ad['url'])
@@ -295,13 +319,10 @@ async def monitoring_loop():
                                     f"🆕 НОВОЕ!\n\n📦 {ad['title']}\n💰 {ad['price']}\n🔗 {ad['url']}",
                                     disable_web_page_preview=True
                                 )
+                                log.info(f"🆕 {ad['title']}")
                                 await asyncio.sleep(1)
                             except:
                                 pass
-
-            delay = Config.interval + random.randint(10, 60)
-            log.info(f"Жду {delay // 60}м {delay % 60}с")
-            await asyncio.sleep(delay)
         else:
             await asyncio.sleep(10)
 
@@ -316,4 +337,5 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
