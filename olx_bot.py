@@ -2,7 +2,6 @@ import os
 import asyncio
 import httpx
 import random
-import sys
 import json
 import threading
 import logging
@@ -40,12 +39,25 @@ def run_flask():
 
 class OLXParser:
     def __init__(self):
-        self.seen_ads = set()
+        self.seen_ids = set()
         self.total_found = 0
         self.total_new = 0
         self.last_check = None
         self.errors = 0
         self.base_ready = False
+        self.warmup_done = False
+        self.check_count = 0
+
+    def _extract_id(self, url):
+        """Извлекаем уникальный ID объявления из URL"""
+        # URL: https://www.olx.pl/d/oferta/iphone-13-pro-CID99-ID19tZx6.html
+        # ID: ID19tZx6
+        clean = url.split("#")[0].split("?")[0].rstrip('/')
+        # Берём последнюю часть после последнего дефиса
+        parts = clean.rstrip('.html').split('-')
+        if parts:
+            return parts[-1]  # например ID19tZx6
+        return clean
 
     async def fetch(self, url=None):
         try:
@@ -102,7 +114,8 @@ class OLXParser:
                         title = title_el.get_text(strip=True) if title_el else "?"
                         price_el = card.find("p", {"data-testid": "ad-price"})
                         price = price_el.get_text(strip=True) if price_el else "?"
-                        ads.append({"title": title, "url": clean, "price": price})
+                        ad_id = self._extract_id(clean)
+                        ads.append({"id": ad_id, "title": title, "url": clean, "price": price})
 
                 if not ads:
                     seen = set()
@@ -113,7 +126,8 @@ class OLXParser:
                             clean = url_full.split("#")[0].split("?")[0].rstrip('/')
                             if clean not in seen:
                                 seen.add(clean)
-                                ads.append({"title": a.get_text(strip=True)[:80] or "?", "url": clean, "price": "?"})
+                                ad_id = self._extract_id(clean)
+                                ads.append({"id": ad_id, "title": a.get_text(strip=True)[:80] or "?", "url": clean, "price": "?"})
 
                 self.total_found = len(ads)
                 return ads if ads else None
@@ -150,12 +164,16 @@ class OLXParser:
             if not url.startswith("http"):
                 url = "https://www.olx.pl" + url
             clean = url.split("#")[0].split("?")[0].rstrip('/')
+
+            # Используем OLX ID если есть, иначе из URL
+            ad_id = str(item.get("id", "")) or self._extract_id(clean)
+
             title = item.get("title", "?")
             price = "?"
             pd = item.get("price", {})
             if isinstance(pd, dict):
                 price = pd.get("displayValue") or "?"
-            ads.append({"title": title, "url": clean, "price": price})
+            ads.append({"id": ad_id, "title": title, "url": clean, "price": price})
         return ads
 
 
@@ -189,8 +207,10 @@ async def cmd_status(msg: types.Message):
         return
     s = "🟢 Работает" if Config.is_running else "🔴 Пауза"
     b = "✅ Готова" if parser.base_ready else "⏳ Собирается"
+    w = "✅ Да" if parser.warmup_done else f"⏳ Проверка {parser.check_count}/3"
     await msg.answer(
-        f"📊 Статус\n\n{s}\nБаза: {b}\nВ базе: {len(parser.seen_ads)}\n"
+        f"📊 Статус\n\n{s}\nБаза: {b}\nПрогрев: {w}\n"
+        f"В базе: {len(parser.seen_ids)} ID\n"
         f"Интервал: {Config.interval}с\nНовых: {parser.total_new}\n"
         f"Ошибок: {parser.errors}\nПроверка: {parser.last_check or 'нет'}\n"
         f"Прокси: {Config.proxy or 'нет'}"
@@ -236,8 +256,10 @@ async def cmd_url(msg: types.Message):
     if len(parts) < 2 or "olx.pl" not in parts[1]:
         return await msg.answer("Пример: /url https://www.olx.pl/...")
     Config.url = parts[1].strip()
-    parser.seen_ads.clear()
+    parser.seen_ids.clear()
     parser.base_ready = False
+    parser.warmup_done = False
+    parser.check_count = 0
     parser.total_new = 0
     await msg.answer("✅ URL обновлён, база сброшена")
 
@@ -269,16 +291,18 @@ async def cmd_check(msg: types.Message):
     ads = await parser.fetch()
     if not ads:
         return await msg.answer("❌ Ничего не найдено")
-    new = [a for a in ads if a['url'] not in parser.seen_ads]
-    await msg.answer(f"Всего: {len(ads)} | В базе: {len(parser.seen_ads)} | Новых: {len(new)}")
+    new = [a for a in ads if a['id'] not in parser.seen_ids]
+    await msg.answer(f"Всего: {len(ads)} | В базе: {len(parser.seen_ids)} | Новых: {len(new)}")
 
 
 @dp.message(Command("reset"))
 async def cmd_reset(msg: types.Message):
     if msg.from_user.id != ADMIN_ID:
         return
-    parser.seen_ads.clear()
+    parser.seen_ids.clear()
     parser.base_ready = False
+    parser.warmup_done = False
+    parser.check_count = 0
     parser.total_new = 0
     await msg.answer("🗑 База очищена, соберу заново")
 
@@ -288,18 +312,17 @@ async def cmd_stats(msg: types.Message):
     if msg.from_user.id != ADMIN_ID:
         return
     await msg.answer(
-        f"📈 В базе: {len(parser.seen_ads)} | Найдено: {parser.total_found} | "
+        f"📈 В базе: {len(parser.seen_ids)} | Найдено: {parser.total_found} | "
         f"Новых: {parser.total_new} | Ошибок: {parser.errors}"
     )
 
 
-async def build_base():
-    """Собираем базу с 5 страниц + двойная проверка — МОЛЧА"""
-    log.info("📦 Собираю базу (5 страниц + перепроверка)...")
-
+async def collect_all_ads():
+    """Собираем ВСЕ объявления с 5 страниц"""
+    all_ads = []
+    seen_in_batch = set()
     sep = "&" if "?" in Config.url else "?"
 
-    # Проход 1: страницы 1-5
     for page in range(1, 6):
         if page == 1:
             ads = await parser.fetch()
@@ -308,38 +331,16 @@ async def build_base():
 
         if ads:
             for ad in ads:
-                parser.seen_ads.add(ad['url'])
-            log.info(f"   Стр.{page}: +{len(ads)} (база: {len(parser.seen_ads)})")
+                if ad['id'] not in seen_in_batch:
+                    seen_in_batch.add(ad['id'])
+                    all_ads.append(ad)
+            log.info(f"   Стр.{page}: +{len(ads)} (уникальных: {len(all_ads)})")
         else:
-            log.info(f"   Стр.{page}: пусто, стоп")
             break
 
         await asyncio.sleep(random.uniform(3, 6))
 
-    # Проход 2: перепроверяем страницы 1-3
-    log.info("   🔄 Перепроверка страниц 1-3...")
-    await asyncio.sleep(random.uniform(5, 10))
-
-    for page in range(1, 4):
-        if page == 1:
-            ads = await parser.fetch()
-        else:
-            ads = await parser.fetch(url=Config.url + f"{sep}page={page}")
-
-        if ads:
-            new_in_recheck = 0
-            for ad in ads:
-                if ad['url'] not in parser.seen_ads:
-                    parser.seen_ads.add(ad['url'])
-                    new_in_recheck += 1
-            if new_in_recheck:
-                log.info(f"   Перепроверка стр.{page}: +{new_in_recheck} новых")
-        
-        await asyncio.sleep(random.uniform(2, 4))
-
-    parser.base_ready = True
-    log.info(f"✅ База готова: {len(parser.seen_ads)} объявлений")
-    return len(parser.seen_ads)
+    return all_ads
 
 
 async def monitoring_loop():
@@ -347,39 +348,84 @@ async def monitoring_loop():
 
     # Приветствие
     try:
-        await bot.send_message(ADMIN_ID, "🚀 OLX Sniper запущен!\n⏳ Собираю базу (~2 мин)...")
+        await bot.send_message(ADMIN_ID, "🚀 OLX Sniper запущен!\n⏳ Собираю базу (~3 мин)...")
     except Exception as e:
         log.error(f"Telegram: {e}")
         return
 
-    # СБОР БАЗЫ — ничего не отправляем
-    base_count = await build_base()
+    # === ФАЗА 1: СБОР БАЗЫ (5 страниц, молча) ===
+    log.info("📦 ФАЗА 1: Сбор базы...")
+    ads = await collect_all_ads()
+    if ads:
+        for ad in ads:
+            parser.seen_ids.add(ad['id'])
+    log.info(f"   После сбора: {len(parser.seen_ids)} ID")
+
+    # === ФАЗА 2: ПРОГРЕВ (3 проверки, молча — добираем пропущенные) ===
+    log.info("🔥 ФАЗА 2: Прогрев (3 проверки)...")
+    try:
+        await bot.send_message(ADMIN_ID, f"📦 База: {len(parser.seen_ids)} ID\n🔥 Прогрев (3 проверки, ~3 мин)...")
+    except:
+        pass
+
+    for i in range(3):
+        await asyncio.sleep(random.uniform(30, 60))
+        ads = await parser.fetch()
+        if ads:
+            added = 0
+            for ad in ads:
+                if ad['id'] not in parser.seen_ids:
+                    parser.seen_ids.add(ad['id'])
+                    added += 1
+            log.info(f"   Прогрев {i+1}/3: добавлено {added} (база: {len(parser.seen_ids)})")
+            parser.check_count = i + 1
+
+    parser.base_ready = True
+    parser.warmup_done = True
+    log.info(f"✅ Прогрев завершён. База: {len(parser.seen_ids)} ID")
 
     try:
         await bot.send_message(
             ADMIN_ID,
-            f"✅ База готова: {base_count} объявлений\n"
-            f"🔍 Слежу ТОЛЬКО за новыми!\n"
+            f"✅ Готово! База: {len(parser.seen_ids)} объявлений\n"
+            f"🔍 Теперь присылаю ТОЛЬКО новые!\n"
             f"⏱ Интервал: ~{Config.interval // 60} мин"
         )
     except:
         pass
 
-    # ОСНОВНОЙ ЦИКЛ — только новые
+    # === ФАЗА 3: МОНИТОРИНГ (только новые) ===
+    log.info("👁 ФАЗА 3: Мониторинг")
+
     while True:
         if not Config.is_running:
             await asyncio.sleep(10)
             continue
 
-        # Если база сброшена — собираем заново
+        # Если база сброшена
         if not parser.base_ready:
             try:
-                await bot.send_message(ADMIN_ID, "⏳ Собираю новую базу...")
+                await bot.send_message(ADMIN_ID, "⏳ Пересобираю базу...")
             except:
                 pass
-            base_count = await build_base()
+
+            ads = await collect_all_ads()
+            if ads:
+                for ad in ads:
+                    parser.seen_ids.add(ad['id'])
+
+            for i in range(3):
+                await asyncio.sleep(random.uniform(30, 60))
+                check = await parser.fetch()
+                if check:
+                    for ad in check:
+                        parser.seen_ids.add(ad['id'])
+
+            parser.base_ready = True
+            parser.warmup_done = True
+
             try:
-                await bot.send_message(ADMIN_ID, f"✅ Новая база: {base_count} объявлений")
+                await bot.send_message(ADMIN_ID, f"✅ База пересобрана: {len(parser.seen_ids)} ID")
             except:
                 pass
             continue
@@ -389,17 +435,17 @@ async def monitoring_loop():
         log.info(f"⏳ Жду {delay // 60}м {delay % 60}с")
         await asyncio.sleep(delay)
 
-        # Проверяем только страницу 1
+        # Проверяем страницу 1
         ads = await parser.fetch()
         if not ads:
-            log.warning("Не удалось получить данные")
+            log.warning("Нет данных")
             continue
 
         # Ищем новые
         new_count = 0
         for ad in ads:
-            if ad['url'] not in parser.seen_ads:
-                parser.seen_ads.add(ad['url'])
+            if ad['id'] not in parser.seen_ids:
+                parser.seen_ids.add(ad['id'])
                 parser.total_new += 1
                 new_count += 1
                 try:
@@ -418,7 +464,7 @@ async def monitoring_loop():
         if new_count:
             log.info(f"🆕 Отправлено: {new_count}")
         else:
-            log.info(f"ℹ️ Новых нет (база: {len(parser.seen_ads)})")
+            log.info(f"ℹ️ Новых нет (база: {len(parser.seen_ids)})")
 
 
 async def main():
