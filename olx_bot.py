@@ -13,6 +13,7 @@ from flask import Flask
 
 TOKEN = "8346602599:AAGz22SEJw5dCJVxVXUAli-pf1Xzf424ZT4"
 ADMIN_ID = 908015235
+RENDER_URL = "https://olx-telegram-bot-1-hi5z.onrender.com"
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(message)s", datefmt="%H:%M:%S")
 log = logging.getLogger("OLX")
@@ -306,6 +307,18 @@ async def cmd_stats(msg: types.Message):
     )
 
 
+async def keep_alive():
+    """Пингуем сами себя каждые 10 минут чтобы Render не усыпил"""
+    while True:
+        await asyncio.sleep(600)
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                await client.get(RENDER_URL)
+            log.info("💓 Пинг — живой")
+        except:
+            pass
+
+
 async def collect_all_ads():
     all_ads = []
     seen_in_batch = set()
@@ -335,12 +348,12 @@ async def monitoring_loop():
     await asyncio.sleep(5)
 
     try:
-        await bot.send_message(ADMIN_ID, "🚀 OLX Sniper запущен!\n⏳ Собираю базу (~5 мин)...")
+        await bot.send_message(ADMIN_ID, "🚀 OLX Sniper запущен!\n⏳ Калибровка (~20 мин)...")
     except Exception as e:
         log.error(f"Telegram: {e}")
         return
 
-    # === ФАЗА 1: СБОР БАЗЫ (5 страниц) ===
+    # === ФАЗА 1: СБОР БАЗЫ ===
     log.info("📦 ФАЗА 1: Сбор базы...")
     ads = await collect_all_ads()
     if ads:
@@ -348,12 +361,8 @@ async def monitoring_loop():
             parser.seen_ids.add(ad['id'])
     log.info(f"   После сбора: {len(parser.seen_ids)} ID")
 
-    # === ФАЗА 2: ПРОГРЕВ (5 проверок с паузами) ===
-    log.info("🔥 ФАЗА 2: Прогрев (5 проверок)...")
-    try:
-        await bot.send_message(ADMIN_ID, f"📦 База: {len(parser.seen_ids)} ID\n🔥 Прогрев (~5 мин)...")
-    except:
-        pass
+    # === ФАЗА 2: ПРОГРЕВ ===
+    log.info("🔥 ФАЗА 2: Прогрев...")
 
     for i in range(5):
         await asyncio.sleep(random.uniform(40, 70))
@@ -365,13 +374,9 @@ async def monitoring_loop():
                     parser.seen_ids.add(ad['id'])
                     added += 1
             log.info(f"   Прогрев {i+1}/5: +{added} (база: {len(parser.seen_ids)})")
-            parser.check_count = i + 1
 
-    parser.base_ready = True
-    log.info(f"✅ Прогрев завершён. База: {len(parser.seen_ids)} ID")
-
-    # === ФАЗА 3: ТИХИЕ ПРОВЕРКИ (3 штуки — молча в базу) ===
-    log.info("🔇 ФАЗА 3: Тихие проверки (3 шт)...")
+    # === ФАЗА 3: ТИХИЕ ПРОВЕРКИ ===
+    log.info("🔇 ФАЗА 3: Тихие проверки...")
 
     for i in range(3):
         delay = Config.interval + random.randint(10, 60)
@@ -387,19 +392,20 @@ async def monitoring_loop():
                     added += 1
             log.info(f"   Тихая {i+1}/3: +{added} (база: {len(parser.seen_ids)})")
 
-    log.info(f"✅ Калибровка завершена. Итого в базе: {len(parser.seen_ids)} ID")
+    parser.base_ready = True
+    log.info(f"✅ Калибровка завершена. База: {len(parser.seen_ids)} ID")
+
     try:
         await bot.send_message(
             ADMIN_ID,
-            f"✅ Калибровка завершена!\n"
-            f"📦 В базе: {len(parser.seen_ids)} ID\n"
-            f"🔍 Теперь присылаю ТОЛЬКО новые!\n"
+            f"✅ Готово! База: {len(parser.seen_ids)} ID\n"
+            f"🔍 Присылаю ТОЛЬКО новые!\n"
             f"⏱ Интервал: ~{Config.interval // 60} мин"
         )
     except:
         pass
 
-    # === ФАЗА 4: МОНИТОРИНГ (только реально новые) ===
+    # === ФАЗА 4: МОНИТОРИНГ ===
     log.info("👁 ФАЗА 4: Мониторинг")
 
     while True:
@@ -422,7 +428,6 @@ async def monitoring_loop():
                 if check:
                     for ad in check:
                         parser.seen_ids.add(ad['id'])
-            # 3 тихие проверки после пересборки
             for i in range(3):
                 await asyncio.sleep(Config.interval + random.randint(10, 60))
                 check = await parser.fetch()
@@ -473,7 +478,7 @@ async def monitoring_loop():
 async def main():
     threading.Thread(target=run_flask, daemon=True).start()
 
-    log.info("⏳ Жду 60 сек (убиваю старую копию)...")
+    log.info("⏳ Жду 60 сек...")
     await asyncio.sleep(60)
 
     await bot.delete_webhook(drop_pending_updates=True)
@@ -486,7 +491,8 @@ async def main():
 
     await asyncio.gather(
         dp.start_polling(bot, skip_updates=True),
-        monitoring_loop()
+        monitoring_loop(),
+        keep_alive()
     )
 
 
