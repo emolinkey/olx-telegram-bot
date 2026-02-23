@@ -46,9 +46,7 @@ def clean_url(url):
         url = "https://www.olx.pl" + url
     # Убираем всё после # и ?
     url = url.split("#")[0].split("?")[0].rstrip('/')
-    # Убираем .html если есть
-    if url.endswith(".html"):
-        url = url[:-5]
+   
     return url
 
 
@@ -488,3 +486,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
