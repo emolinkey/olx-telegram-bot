@@ -16,7 +16,7 @@ from flask import Flask
 TOKEN = "8346602599:AAGz22SEJw5dCJVxVXUAli-pf1Xzf424ZT4"
 ADMIN_ID = 908015235
 RENDER_URL = "https://olx-telegram-bot-1-hi5z.onrender.com"
-VERSION = "2.0 PRO"
+VERSION = "2.1 PRO"
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(message)s", datefmt="%H:%M:%S")
 log = logging.getLogger("OLX")
@@ -30,9 +30,6 @@ class Config:
     max_age_minutes = 30
     notify_sound = True
     show_age = True
-    auto_check_pages = 7
-    warmup_checks = 5
-    silent_checks = 5
 
 
 class Stats:
@@ -42,6 +39,7 @@ class Stats:
     blocked_promoted = 0
     blocked_old = 0
     blocked_refreshed = 0
+    blocked_no_date = 0
     last_reset_day = None
 
     @classmethod
@@ -199,23 +197,31 @@ class OLXParser:
                 promoted = True
             if item.get("isHighlighted", False):
                 promoted = True
+            # Дополнительная проверка на business
+            if item.get("isBusiness", False):
+                promoted = True
+            partner = item.get("partner", {})
+            if isinstance(partner, dict) and len(partner) > 0:
+                promoted = True
 
-            created = item.get("createdTime", "")
-            last_refresh = item.get("lastRefreshTime", "")
+            created = item.get("createdTime", "") or item.get("created_time", "") or ""
+            last_refresh = item.get("lastRefreshTime", "") or item.get("last_refresh_time", "") or ""
 
             refreshed = False
             if created and last_refresh and created != last_refresh:
                 refreshed = True
 
-            # Город
             city = ""
             loc = item.get("location", {})
             if isinstance(loc, dict):
-                city = loc.get("city", {}).get("name", "")
+                city_data = loc.get("city", {})
+                if isinstance(city_data, dict):
+                    city = city_data.get("name", "")
                 if not city:
-                    city = loc.get("region", {}).get("name", "")
+                    region_data = loc.get("region", {})
+                    if isinstance(region_data, dict):
+                        city = region_data.get("name", "")
 
-            # Фото
             photo = None
             photos = item.get("photos", [])
             if photos and isinstance(photos, list) and len(photos) > 0:
@@ -240,42 +246,68 @@ class OLXParser:
         return ads
 
     def is_fresh(self, ad):
+        """Строгая проверка свежести. Нет даты = блокируем."""
         created = ad.get("created", "")
         if not created:
             return False
+
         try:
-            if "T" in created:
-                clean_date = created.replace("+01:00", "").replace("+02:00", "").replace("Z", "")
-                ad_time = datetime.fromisoformat(clean_date)
-                now = datetime.utcnow() + timedelta(hours=1)
-                age = now - ad_time
-                age_minutes = age.total_seconds() / 60
-                return age_minutes <= Config.max_age_minutes
+            clean = created
+            for tz in ["+01:00", "+02:00", "+00:00", "+03:00", "Z"]:
+                clean = clean.replace(tz, "")
+
+            if "T" not in clean:
+                return False
+
+            ad_time = datetime.fromisoformat(clean)
+
+            # Пробуем UTC+1 (зима) и UTC+2 (лето)
+            now_utc1 = datetime.utcnow() + timedelta(hours=1)
+            now_utc2 = datetime.utcnow() + timedelta(hours=2)
+
+            age1 = (now_utc1 - ad_time).total_seconds() / 60
+            age2 = (now_utc2 - ad_time).total_seconds() / 60
+
+            # Берём минимальный положительный возраст
+            ages = [a for a in [age1, age2] if a >= -5]
+            if not ages:
+                return False
+
+            age_minutes = min(ages)
+
+            return age_minutes <= Config.max_age_minutes
+
         except:
-            pass
-        return False
+            return False
 
     def get_age_str(self, ad):
         created = ad.get("created", "")
         if not created:
             return ""
         try:
-            if "T" in created:
-                clean_date = created.replace("+01:00", "").replace("+02:00", "").replace("Z", "")
-                ad_time = datetime.fromisoformat(clean_date)
-                now = datetime.utcnow() + timedelta(hours=1)
+            clean = created
+            for tz in ["+01:00", "+02:00", "+00:00", "+03:00", "Z"]:
+                clean = clean.replace(tz, "")
+            if "T" not in clean:
+                return ""
+            ad_time = datetime.fromisoformat(clean)
+            now = datetime.utcnow() + timedelta(hours=1)
+            age_min = int((now - ad_time).total_seconds() / 60)
+            if age_min < 0:
+                now = datetime.utcnow() + timedelta(hours=2)
                 age_min = int((now - ad_time).total_seconds() / 60)
-                if age_min < 1:
-                    return "только что"
-                elif age_min < 60:
-                    return f"{age_min} мин назад"
-                elif age_min < 1440:
-                    return f"{age_min // 60}ч {age_min % 60}м назад"
-                else:
-                    return f"{age_min // 1440}д назад"
+            if age_min < 0:
+                return ""
+            if age_min < 1:
+                return "только что"
+            elif age_min < 60:
+                return f"{age_min} мин назад"
+            elif age_min < 1440:
+                return f"{age_min // 60}ч {age_min % 60}м назад"
+            else:
+                return f"{age_min // 1440}д назад"
         except:
-            pass
-        return ""
+            return ""
 
     def add_to_history(self, ad):
         self.history.append({
@@ -315,15 +347,13 @@ def get_main_keyboard():
 
 def get_settings_keyboard():
     sound = "🔔" if Config.notify_sound else "🔕"
-    age_icon = "🕐"
     return InlineKeyboardMarkup(inline_keyboard=[
         [
             InlineKeyboardButton(text=f"⏱ Интервал: {Config.interval}с", callback_data="info_interval"),
-            InlineKeyboardButton(text=f"{age_icon} Возраст: {Config.max_age_minutes}м", callback_data="info_age")
+            InlineKeyboardButton(text=f"🕐 Возраст: {Config.max_age_minutes}м", callback_data="info_age")
         ],
         [
-            InlineKeyboardButton(text=f"{sound} Звук", callback_data="toggle_sound"),
-            InlineKeyboardButton(text=f"📄 Страниц: {Config.auto_check_pages}", callback_data="info_pages")
+            InlineKeyboardButton(text=f"{sound} Звук", callback_data="toggle_sound")
         ],
         [
             InlineKeyboardButton(text="◀️ Назад", callback_data="back_main")
@@ -335,26 +365,22 @@ def get_settings_keyboard():
 async def cmd_start(msg: types.Message):
     if msg.from_user.id != ADMIN_ID:
         return await msg.answer("⛔ Доступ запрещён")
-
     await msg.answer(
         f"🎯 *OLX Sniper Bot v{VERSION}*\n\n"
-        f"Автоматический мониторинг OLX\n"
-        f"с фильтрацией promoted и старых объявлений\n\n"
+        f"Автоматический мониторинг OLX\n\n"
         f"*Команды:*\n"
-        f"├ /status — статус бота\n"
-        f"├ /check — проверить сейчас\n"
-        f"├ /pause — пауза\n"
-        f"├ /resume — продолжить\n"
-        f"├ /interval `180` — интервал (сек)\n"
-        f"├ /age `30` — макс возраст (мин)\n"
-        f"├ /url `<ссылка>` — сменить поиск\n"
-        f"├ /proxy `<прокси>` — установить прокси\n"
-        f"├ /noproxy — убрать прокси\n"
-        f"├ /history — последние находки\n"
-        f"├ /filters — активные фильтры\n"
-        f"├ /reset — сбросить базу\n"
-        f"└ /stats — статистика\n\n"
-        f"⬇️ Или используй кнопки:",
+        f"├ /status — статус\n"
+        f"├ /check — проверить\n"
+        f"├ /pause /resume — пауза\n"
+        f"├ /interval `180` — интервал\n"
+        f"├ /age `30` — макс возраст\n"
+        f"├ /url `<ссылка>` — поиск\n"
+        f"├ /proxy `<прокси>` — прокси\n"
+        f"├ /noproxy — без прокси\n"
+        f"├ /history — находки\n"
+        f"├ /filters — фильтры\n"
+        f"├ /reset — сброс\n"
+        f"└ /stats — статистика",
         parse_mode=ParseMode.MARKDOWN,
         reply_markup=get_main_keyboard()
     )
@@ -365,7 +391,7 @@ async def cb_back(callback: types.CallbackQuery):
     if callback.from_user.id != ADMIN_ID:
         return
     await callback.message.edit_text(
-        f"🎯 *OLX Sniper Bot v{VERSION}*\n\nВыбери действие:",
+        f"🎯 *OLX Sniper v{VERSION}*\n\nВыбери действие:",
         parse_mode=ParseMode.MARKDOWN,
         reply_markup=get_main_keyboard()
     )
@@ -377,13 +403,10 @@ async def cb_settings(callback: types.CallbackQuery):
         return
     await callback.message.edit_text(
         "⚙️ *Настройки*\n\n"
-        f"Интервал: {Config.interval} сек\n"
+        f"Интервал: {Config.interval}с\n"
         f"Макс возраст: {Config.max_age_minutes} мин\n"
-        f"Страниц при сборе: {Config.auto_check_pages}\n"
         f"Звук: {'🔔 Вкл' if Config.notify_sound else '🔕 Выкл'}\n\n"
-        "Для изменения используй команды:\n"
-        "`/interval 180`\n"
-        "`/age 30`",
+        "Команды:\n`/interval 180`\n`/age 30`",
         parse_mode=ParseMode.MARKDOWN,
         reply_markup=get_settings_keyboard()
     )
@@ -394,7 +417,7 @@ async def cb_sound(callback: types.CallbackQuery):
     if callback.from_user.id != ADMIN_ID:
         return
     Config.notify_sound = not Config.notify_sound
-    await callback.answer(f"Звук {'включён 🔔' if Config.notify_sound else 'выключен 🔕'}")
+    await callback.answer(f"Звук {'вкл 🔔' if Config.notify_sound else 'выкл 🔕'}")
     await cb_settings(callback)
 
 
@@ -405,21 +428,19 @@ async def cb_status(callback: types.CallbackQuery):
     await callback.answer()
     s = "🟢 Работает" if Config.is_running else "🔴 Пауза"
     b = "✅ Готова" if parser.base_ready else "⏳ Собирается"
-    uptime = ""
+    uptime = "—"
     if parser.start_time:
         delta = datetime.now() - parser.start_time
-        hours = int(delta.total_seconds() // 3600)
-        mins = int((delta.total_seconds() % 3600) // 60)
-        uptime = f"{hours}ч {mins}м"
+        h = int(delta.total_seconds() // 3600)
+        m = int((delta.total_seconds() % 3600) // 60)
+        uptime = f"{h}ч {m}м"
     await callback.message.edit_text(
-        f"📊 *Статус бота*\n\n"
-        f"Состояние: {s}\n"
-        f"База: {b}\n"
+        f"📊 *Статус*\n\n"
+        f"{s} | База: {b}\n"
         f"В базе: `{len(parser.seen)}` ID\n"
         f"Аптайм: {uptime}\n"
-        f"Последняя проверка: {parser.last_check or 'нет'}\n"
-        f"Ошибок: {parser.errors}\n"
-        f"Прокси: {Config.proxy or 'нет'}",
+        f"Проверка: {parser.last_check or '—'}\n"
+        f"Ошибок: {parser.errors}",
         parse_mode=ParseMode.MARKDOWN,
         reply_markup=get_main_keyboard()
     )
@@ -432,18 +453,16 @@ async def cb_check(callback: types.CallbackQuery):
     await callback.answer("🔍 Проверяю...")
     ads = await parser.fetch()
     if not ads:
-        await callback.message.edit_text("❌ Не удалось получить данные", reply_markup=get_main_keyboard())
+        await callback.message.edit_text("❌ Нет данных", reply_markup=get_main_keyboard())
         return
     new_ids = [a for a in ads if a['olx_id'] not in parser.seen]
-    fresh = [a for a in new_ids if parser.is_fresh(a)]
+    fresh = [a for a in new_ids if parser.is_fresh(a) and not a['promoted'] and not a['refreshed']]
     promoted = len([a for a in ads if a['promoted']])
     await callback.message.edit_text(
-        f"🔍 *Результат проверки*\n\n"
-        f"Всего: {len(ads)}\n"
-        f"Promoted: {promoted}\n"
-        f"В базе: {len(parser.seen)}\n"
-        f"Новых ID: {len(new_ids)}\n"
-        f"Свежих: {len(fresh)}",
+        f"🔍 *Проверка*\n\n"
+        f"Всего: {len(ads)}\nPromoted: {promoted}\n"
+        f"В базе: {len(parser.seen)}\nНовых: {len(new_ids)}\n"
+        f"Пройдут фильтр: {len(fresh)}",
         parse_mode=ParseMode.MARKDOWN,
         reply_markup=get_main_keyboard()
     )
@@ -475,15 +494,13 @@ async def cb_stats(callback: types.CallbackQuery):
     Stats.daily_reset()
     await callback.message.edit_text(
         f"📈 *Статистика*\n\n"
-        f"🔍 Всего проверок: {Stats.checks_total}\n"
-        f"📅 Сегодня проверок: {Stats.checks_today}\n"
-        f"🆕 Новых сегодня: {Stats.new_today}\n"
-        f"🆕 Новых всего: {parser.total_new}\n\n"
+        f"Проверок: {Stats.checks_total} (сегодня: {Stats.checks_today})\n"
+        f"Новых: {parser.total_new} (сегодня: {Stats.new_today})\n\n"
         f"*Заблокировано:*\n"
-        f"├ 🚫 Promoted: {Stats.blocked_promoted}\n"
-        f"├ 🔄 Refreshed: {Stats.blocked_refreshed}\n"
-        f"└ ⏰ Старых: {Stats.blocked_old}\n\n"
-        f"📦 В базе: {len(parser.seen)} ID",
+        f"├ Promoted: {Stats.blocked_promoted}\n"
+        f"├ Refreshed: {Stats.blocked_refreshed}\n"
+        f"├ Старых: {Stats.blocked_old}\n"
+        f"└ Без даты: {Stats.blocked_no_date}",
         parse_mode=ParseMode.MARKDOWN,
         reply_markup=get_main_keyboard()
     )
@@ -495,19 +512,20 @@ async def cb_history(callback: types.CallbackQuery):
         return
     await callback.answer()
     if not parser.history:
-        await callback.message.edit_text("📜 История пуста", reply_markup=get_main_keyboard())
+        await callback.message.edit_text("📜 Пусто", reply_markup=get_main_keyboard())
         return
     lines = []
     for h in parser.history[-10:]:
-        lines.append(f"⏰ {h['time']} | {h['price']} | {h['title']}")
-    text = "📜 *Последние находки:*\n\n" + "\n".join(lines)
-    await callback.message.edit_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=get_main_keyboard())
+        lines.append(f"`{h['time']}` | {h['price']} | {h['title']}")
+    await callback.message.edit_text(
+        "📜 *Последние находки:*\n\n" + "\n".join(lines),
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=get_main_keyboard()
+    )
 
 
 @dp.callback_query(lambda c: c.data and c.data.startswith("info_"))
 async def cb_info(callback: types.CallbackQuery):
-    if callback.from_user.id != ADMIN_ID:
-        return
     await callback.answer("Используй команды для изменения")
 
 
@@ -516,18 +534,15 @@ async def cmd_status(msg: types.Message):
     if msg.from_user.id != ADMIN_ID:
         return
     s = "🟢 Работает" if Config.is_running else "🔴 Пауза"
-    b = "✅ Готова" if parser.base_ready else "⏳ Собирается"
+    b = "✅" if parser.base_ready else "⏳"
     uptime = ""
     if parser.start_time:
-        delta = datetime.now() - parser.start_time
-        hours = int(delta.total_seconds() // 3600)
-        mins = int((delta.total_seconds() % 3600) // 60)
-        uptime = f"\nАптайм: {hours}ч {mins}м"
+        d = datetime.now() - parser.start_time
+        uptime = f"\nАптайм: {d.days}д {int(d.seconds//3600)}ч {int(d.seconds%3600//60)}м"
     await msg.answer(
-        f"📊 Статус\n\n{s}\nБаза: {b}\nВ базе: {len(parser.seen)}\n"
-        f"Интервал: {Config.interval}с\nМакс возраст: {Config.max_age_minutes} мин\n"
-        f"Новых: {parser.total_new}\nОшибок: {parser.errors}\n"
-        f"Проверка: {parser.last_check or 'нет'}\nПрокси: {Config.proxy or 'нет'}{uptime}",
+        f"📊 {s} | База: {b} ({len(parser.seen)})\n"
+        f"Интервал: {Config.interval}с | Возраст: {Config.max_age_minutes}м\n"
+        f"Новых: {parser.total_new} | Ошибок: {parser.errors}{uptime}",
         reply_markup=get_main_keyboard()
     )
 
@@ -537,7 +552,7 @@ async def cmd_pause(msg: types.Message):
     if msg.from_user.id != ADMIN_ID:
         return
     Config.is_running = False
-    await msg.answer("⏸ Мониторинг на паузе", reply_markup=get_main_keyboard())
+    await msg.answer("⏸ Пауза")
 
 
 @dp.message(Command("resume"))
@@ -545,7 +560,7 @@ async def cmd_resume(msg: types.Message):
     if msg.from_user.id != ADMIN_ID:
         return
     Config.is_running = True
-    await msg.answer("▶️ Мониторинг возобновлён", reply_markup=get_main_keyboard())
+    await msg.answer("▶️ Возобновлено")
 
 
 @dp.message(Command("interval"))
@@ -556,11 +571,11 @@ async def cmd_interval(msg: types.Message):
         sec = int(msg.text.split()[1])
         if 60 <= sec <= 3600:
             Config.interval = sec
-            await msg.answer(f"✅ Интервал: {sec}с ({sec // 60} мин)")
+            await msg.answer(f"✅ Интервал: {sec}с")
         else:
-            await msg.answer("⚠️ Допустимо: 60-3600 сек")
+            await msg.answer("60-3600")
     except:
-        await msg.answer("Пример: `/interval 180`", parse_mode=ParseMode.MARKDOWN)
+        await msg.answer("`/interval 180`", parse_mode=ParseMode.MARKDOWN)
 
 
 @dp.message(Command("age"))
@@ -568,14 +583,14 @@ async def cmd_age(msg: types.Message):
     if msg.from_user.id != ADMIN_ID:
         return
     try:
-        mins = int(msg.text.split()[1])
-        if 5 <= mins <= 1440:
-            Config.max_age_minutes = mins
-            await msg.answer(f"✅ Макс возраст: {mins} мин")
+        m = int(msg.text.split()[1])
+        if 5 <= m <= 1440:
+            Config.max_age_minutes = m
+            await msg.answer(f"✅ Возраст: {m} мин")
         else:
-            await msg.answer("⚠️ Допустимо: 5-1440 мин")
+            await msg.answer("5-1440")
     except:
-        await msg.answer("Пример: `/age 30`", parse_mode=ParseMode.MARKDOWN)
+        await msg.answer("`/age 30`", parse_mode=ParseMode.MARKDOWN)
 
 
 @dp.message(Command("url"))
@@ -584,12 +599,12 @@ async def cmd_url(msg: types.Message):
         return
     parts = msg.text.split(maxsplit=1)
     if len(parts) < 2 or "olx.pl" not in parts[1]:
-        return await msg.answer("Пример:\n`/url https://www.olx.pl/...`", parse_mode=ParseMode.MARKDOWN)
+        return await msg.answer("`/url https://www.olx.pl/...`", parse_mode=ParseMode.MARKDOWN)
     Config.url = parts[1].strip()
     parser.seen.clear()
     parser.base_ready = False
     parser.total_new = 0
-    await msg.answer("✅ URL обновлён\n🗑 База сброшена\n⏳ Пересобираю...")
+    await msg.answer("✅ URL обновлён, база сброшена")
 
 
 @dp.message(Command("proxy"))
@@ -598,7 +613,7 @@ async def cmd_proxy(msg: types.Message):
         return
     parts = msg.text.split(maxsplit=1)
     if len(parts) < 2:
-        return await msg.answer("Пример:\n`/proxy http://user:pass@ip:port`", parse_mode=ParseMode.MARKDOWN)
+        return await msg.answer("`/proxy http://user:pass@ip:port`", parse_mode=ParseMode.MARKDOWN)
     Config.proxy = parts[1].strip()
     await msg.answer("✅ Прокси установлен")
 
@@ -618,20 +633,11 @@ async def cmd_check(msg: types.Message):
     await msg.answer("🔍 Проверяю...")
     ads = await parser.fetch()
     if not ads:
-        return await msg.answer("❌ Ничего не найдено")
+        return await msg.answer("❌ Нет данных")
     new_ids = [a for a in ads if a['olx_id'] not in parser.seen]
-    fresh = [a for a in new_ids if parser.is_fresh(a)]
-    promoted = len([a for a in ads if a['promoted']])
-    refreshed = len([a for a in ads if a['refreshed']])
+    fresh = [a for a in new_ids if parser.is_fresh(a) and not a['promoted'] and not a['refreshed']]
     await msg.answer(
-        f"📊 *Результат:*\n\n"
-        f"Всего: {len(ads)}\n"
-        f"Promoted: {promoted}\n"
-        f"Refreshed: {refreshed}\n"
-        f"В базе: {len(parser.seen)}\n"
-        f"Новых ID: {len(new_ids)}\n"
-        f"Свежих (до {Config.max_age_minutes}м): {len(fresh)}",
-        parse_mode=ParseMode.MARKDOWN
+        f"Всего: {len(ads)} | Новых: {len(new_ids)} | Пройдут фильтр: {len(fresh)}"
     )
 
 
@@ -640,16 +646,14 @@ async def cmd_filters(msg: types.Message):
     if msg.from_user.id != ADMIN_ID:
         return
     await msg.answer(
-        f"🛡 *Активные фильтры:*\n\n"
-        f"├ 🚫 Блокировка promoted\n"
-        f"├ 🔄 Блокировка refreshed\n"
-        f"├ ⏰ Макс возраст: {Config.max_age_minutes} мин\n"
-        f"├ 🔢 Дедупликация по ID\n"
-        f"└ 📦 База: {len(parser.seen)} ID\n\n"
-        f"*Заблокировано за всё время:*\n"
-        f"├ Promoted: {Stats.blocked_promoted}\n"
-        f"├ Refreshed: {Stats.blocked_refreshed}\n"
-        f"└ Старых: {Stats.blocked_old}",
+        f"🛡 *Фильтры:*\n\n"
+        f"├ 🚫 Promoted → блок\n"
+        f"├ 🔄 Refreshed → блок\n"
+        f"├ ❌ Без даты → блок\n"
+        f"├ ⏰ Старше {Config.max_age_minutes}м → блок\n"
+        f"└ 🔢 Дубликаты → блок\n\n"
+        f"Заблокировано: P:{Stats.blocked_promoted} R:{Stats.blocked_refreshed} "
+        f"O:{Stats.blocked_old} N:{Stats.blocked_no_date}",
         parse_mode=ParseMode.MARKDOWN
     )
 
@@ -659,24 +663,21 @@ async def cmd_history(msg: types.Message):
     if msg.from_user.id != ADMIN_ID:
         return
     if not parser.history:
-        return await msg.answer("📜 История пуста")
-    lines = []
-    for h in parser.history[-15:]:
-        lines.append(f"`{h['time']}` | {h['price']} | {h['title']}")
-    text = "📜 *Последние находки:*\n\n" + "\n".join(lines)
-    await msg.answer(text, parse_mode=ParseMode.MARKDOWN)
+        return await msg.answer("📜 Пусто")
+    lines = [f"`{h['time']}` | {h['price']} | {h['title']}" for h in parser.history[-15:]]
+    await msg.answer("📜 *Находки:*\n\n" + "\n".join(lines), parse_mode=ParseMode.MARKDOWN)
 
 
 @dp.message(Command("reset"))
 async def cmd_reset(msg: types.Message):
     if msg.from_user.id != ADMIN_ID:
         return
-    count = len(parser.seen)
+    c = len(parser.seen)
     parser.seen.clear()
     parser.base_ready = False
     parser.total_new = 0
     parser.history.clear()
-    await msg.answer(f"🗑 Очищено {count} ID\n⏳ Пересобираю базу...")
+    await msg.answer(f"🗑 Очищено {c} ID")
 
 
 @dp.message(Command("stats"))
@@ -684,26 +685,18 @@ async def cmd_stats(msg: types.Message):
     if msg.from_user.id != ADMIN_ID:
         return
     Stats.daily_reset()
-    uptime = ""
+    uptime = "—"
     if parser.start_time:
-        delta = datetime.now() - parser.start_time
-        days = delta.days
-        hours = int((delta.total_seconds() % 86400) // 3600)
-        mins = int((delta.total_seconds() % 3600) // 60)
-        uptime = f"{days}д {hours}ч {mins}м"
+        d = datetime.now() - parser.start_time
+        uptime = f"{d.days}д {int(d.seconds//3600)}ч {int(d.seconds%3600//60)}м"
     await msg.answer(
         f"📈 *Статистика*\n\n"
-        f"⏱ Аптайм: {uptime}\n"
-        f"🔍 Проверок всего: {Stats.checks_total}\n"
-        f"📅 Проверок сегодня: {Stats.checks_today}\n"
-        f"🆕 Новых сегодня: {Stats.new_today}\n"
-        f"🆕 Новых всего: {parser.total_new}\n\n"
-        f"*Заблокировано:*\n"
-        f"├ 🚫 Promoted: {Stats.blocked_promoted}\n"
-        f"├ 🔄 Refreshed: {Stats.blocked_refreshed}\n"
-        f"└ ⏰ Старых: {Stats.blocked_old}\n\n"
-        f"📦 В базе: {len(parser.seen)} ID\n"
-        f"📊 Последняя выдача: {parser.total_found} шт",
+        f"Аптайм: {uptime}\n"
+        f"Проверок: {Stats.checks_total} ({Stats.checks_today} сегодня)\n"
+        f"Новых: {parser.total_new} ({Stats.new_today} сегодня)\n\n"
+        f"Blocked: P:{Stats.blocked_promoted} R:{Stats.blocked_refreshed} "
+        f"O:{Stats.blocked_old} N:{Stats.blocked_no_date}\n"
+        f"База: {len(parser.seen)}",
         parse_mode=ParseMode.MARKDOWN
     )
 
@@ -729,7 +722,7 @@ async def collect_pages(pages=7):
         if ads:
             for ad in ads:
                 all_ads[ad['olx_id']] = ad
-            log.info(f"   Стр.{page}: +{len(ads)} (уникальных: {len(all_ads)})")
+            log.info(f"   Стр.{page}: +{len(ads)} (уник: {len(all_ads)})")
         else:
             break
         await asyncio.sleep(random.uniform(3, 6))
@@ -753,61 +746,54 @@ async def monitoring_loop():
     try:
         await bot.send_message(
             ADMIN_ID,
-            f"🚀 *OLX Sniper v{VERSION}*\n\n"
-            f"⏳ Калибровка (~25 мин)...\n"
-            f"Не трогай, я соберу базу и начну мониторинг.",
+            f"🚀 *OLX Sniper v{VERSION}*\n\n⏳ Калибровка (~25 мин)...",
             parse_mode=ParseMode.MARKDOWN
         )
     except Exception as e:
         log.error(f"Telegram: {e}")
         return
 
-    # ФАЗА 1
+    # ФАЗА 1: 7 страниц
     log.info("📦 ФАЗА 1: Сбор базы...")
-    ads = await collect_pages(Config.auto_check_pages)
+    ads = await collect_pages(7)
     await add_to_base(ads)
     log.info(f"   База: {len(parser.seen)}")
 
-    # ФАЗА 2
+    # ФАЗА 2: 5 прогревов
     log.info("🔥 ФАЗА 2: Прогрев...")
-    for i in range(Config.warmup_checks):
+    for i in range(5):
         await asyncio.sleep(random.uniform(40, 70))
         ads = await parser.fetch()
         added = await add_to_base(ads)
-        log.info(f"   Прогрев {i+1}/{Config.warmup_checks}: +{added} (база: {len(parser.seen)})")
+        log.info(f"   Прогрев {i+1}/5: +{added} ({len(parser.seen)})")
 
-    # ФАЗА 3
-    log.info("🔇 ФАЗА 3: Тихие проверки...")
-    for i in range(Config.silent_checks):
+    # ФАЗА 3: 5 тихих
+    log.info("🔇 ФАЗА 3: Тихие...")
+    for i in range(5):
         delay = Config.interval + random.randint(10, 60)
-        log.info(f"   Тихая {i+1}/{Config.silent_checks}: жду {delay // 60}м {delay % 60}с")
+        log.info(f"   Тихая {i+1}/5: жду {delay//60}м {delay%60}с")
         await asyncio.sleep(delay)
         ads = await parser.fetch()
         added = await add_to_base(ads)
-        log.info(f"   Тихая {i+1}/{Config.silent_checks}: +{added} (база: {len(parser.seen)})")
+        log.info(f"   Тихая {i+1}/5: +{added} ({len(parser.seen)})")
 
     parser.base_ready = True
-    log.info(f"✅ Калибровка завершена. База: {len(parser.seen)}")
+    log.info(f"✅ Калибровка: {len(parser.seen)}")
 
     try:
         await bot.send_message(
             ADMIN_ID,
             f"✅ *Калибровка завершена!*\n\n"
-            f"📦 База: {len(parser.seen)} объявлений\n\n"
-            f"🛡 *Фильтры:*\n"
-            f"├ Только новые ID\n"
-            f"├ Без promoted\n"
-            f"├ Без refreshed\n"
-            f"└ Не старше {Config.max_age_minutes} мин\n\n"
-            f"⏱ Интервал: ~{Config.interval // 60} мин\n"
-            f"🔍 Начинаю мониторинг!",
+            f"📦 База: {len(parser.seen)}\n"
+            f"🛡 Фильтры: promoted, refreshed, без даты, старше {Config.max_age_minutes}м\n"
+            f"⏱ Интервал: ~{Config.interval//60} мин",
             parse_mode=ParseMode.MARKDOWN,
             reply_markup=get_main_keyboard()
         )
     except:
         pass
 
-    # ФАЗА 4
+    # ФАЗА 4: Мониторинг
     log.info("👁 ФАЗА 4: Мониторинг")
 
     while True:
@@ -817,28 +803,28 @@ async def monitoring_loop():
 
         if not parser.base_ready:
             try:
-                await bot.send_message(ADMIN_ID, "⏳ Пересобираю базу...")
+                await bot.send_message(ADMIN_ID, "⏳ Пересборка базы...")
             except:
                 pass
-            ads = await collect_pages(Config.auto_check_pages)
+            ads = await collect_pages(7)
             await add_to_base(ads)
-            for i in range(Config.warmup_checks):
+            for i in range(5):
                 await asyncio.sleep(random.uniform(40, 70))
                 a = await parser.fetch()
                 await add_to_base(a)
-            for i in range(Config.silent_checks):
+            for i in range(5):
                 await asyncio.sleep(Config.interval + random.randint(10, 60))
                 a = await parser.fetch()
                 await add_to_base(a)
             parser.base_ready = True
             try:
-                await bot.send_message(ADMIN_ID, f"✅ База: {len(parser.seen)} ID", reply_markup=get_main_keyboard())
+                await bot.send_message(ADMIN_ID, f"✅ База: {len(parser.seen)}", reply_markup=get_main_keyboard())
             except:
                 pass
             continue
 
         delay = Config.interval + random.randint(10, 60)
-        log.info(f"⏳ Жду {delay // 60}м {delay % 60}с")
+        log.info(f"⏳ Жду {delay//60}м {delay%60}с")
         await asyncio.sleep(delay)
 
         Stats.daily_reset()
@@ -852,24 +838,38 @@ async def monitoring_loop():
 
         new_count = 0
         for ad in ads:
+            # Уже в базе
             if ad['olx_id'] in parser.seen:
                 continue
 
+            # Добавляем в базу СРАЗУ чтобы не повторялось
             parser.seen.add(ad['olx_id'])
 
+            # ФИЛЬТР 1: promoted
             if ad['promoted']:
                 Stats.blocked_promoted += 1
+                log.info(f"   🚫 Promoted: {ad['title'][:40]}")
                 continue
 
+            # ФИЛЬТР 2: refreshed
             if ad['refreshed']:
                 Stats.blocked_refreshed += 1
+                log.info(f"   🔄 Refreshed: {ad['title'][:40]}")
                 continue
 
-            if ad['created']:
-                if not parser.is_fresh(ad):
-                    Stats.blocked_old += 1
-                    continue
+            # ФИЛЬТР 3: нет даты
+            if not ad.get('created'):
+                Stats.blocked_no_date += 1
+                log.info(f"   ❌ Без даты: {ad['title'][:40]}")
+                continue
 
+            # ФИЛЬТР 4: старое
+            if not parser.is_fresh(ad):
+                Stats.blocked_old += 1
+                log.info(f"   ⏰ Старое: {ad['title'][:40]} ({ad['created'][:16]})")
+                continue
+
+            # ПРОШЛО ВСЕ ФИЛЬТРЫ
             parser.total_new += 1
             Stats.new_today += 1
             new_count += 1
@@ -886,28 +886,36 @@ async def monitoring_loop():
                 city_str = f"\n📍 {ad['city']}"
 
             try:
-                msg_text = (
+                await bot.send_message(
+                    ADMIN_ID,
                     f"🆕 *НОВОЕ ОБЪЯВЛЕНИЕ!*\n\n"
                     f"📦 {ad['title']}\n"
                     f"💰 {ad['price']}{city_str}{age_str}\n"
-                    f"🔗 [Открыть на OLX]({ad['url']})"
-                )
-
-                await bot.send_message(
-                    ADMIN_ID,
-                    msg_text,
+                    f"🔗 [Открыть на OLX]({ad['url']})",
                     parse_mode=ParseMode.MARKDOWN,
                     disable_web_page_preview=False,
                     disable_notification=not Config.notify_sound
                 )
                 await asyncio.sleep(1)
             except Exception as e:
-                log.error(f"Отправка: {e}")
+                # Если Markdown ломает ссылку — без Markdown
+                try:
+                    await bot.send_message(
+                        ADMIN_ID,
+                        f"🆕 НОВОЕ ОБЪЯВЛЕНИЕ!\n\n"
+                        f"📦 {ad['title']}\n"
+                        f"💰 {ad['price']}{city_str}{age_str}\n"
+                        f"🔗 {ad['url']}",
+                        disable_web_page_preview=True,
+                        disable_notification=not Config.notify_sound
+                    )
+                except:
+                    log.error(f"Отправка: {e}")
 
         if new_count:
             log.info(f"🆕 Отправлено: {new_count}")
         else:
-            log.info(f"ℹ️ Новых нет (база: {len(parser.seen)})")
+            log.info(f"ℹ️ Новых нет ({len(parser.seen)})")
 
 
 async def main():
@@ -919,7 +927,7 @@ async def main():
     await bot.delete_webhook(drop_pending_updates=True)
     await asyncio.sleep(5)
 
-    log.info(f"🚀 OLX SNIPER v{VERSION} ЗАПУЩЕН")
+    log.info(f"🚀 OLX SNIPER v{VERSION}")
 
     logging.getLogger("aiogram.dispatcher").setLevel(logging.CRITICAL)
     logging.getLogger("aiogram.event").setLevel(logging.CRITICAL)
