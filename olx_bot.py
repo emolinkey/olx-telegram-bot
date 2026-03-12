@@ -509,10 +509,13 @@ async def cb_settings(cb: types.CallbackQuery):
     if cb.from_user.id != ADMIN_ID:
         return
     await cb.answer()
-    await cb.message.edit_text(
-        f"⚙️ Интервал: {Config.interval}с\nЗвук: {'🔔' if Config.notify_sound else '🔕'}\n\n`/interval 210`",
-        parse_mode=ParseMode.MARKDOWN, reply_markup=kb_settings()
-    )
+    try:
+        await cb.message.edit_text(
+            f"⚙️ Интервал: {Config.interval}с\nЗвук: {'🔔' if Config.notify_sound else '🔕'}\n\n`/interval 210`",
+            parse_mode=ParseMode.MARKDOWN, reply_markup=kb_settings()
+        )
+    except Exception:
+        pass
 
 
 @dp.callback_query(lambda c: c.data == "toggle_sound")
@@ -552,10 +555,13 @@ async def send_status(chat_id, edit_msg=None):
     elif Config.url:
         q = "✅"
     t = f"📊 {s} | База: {b} ({len(parser.seen)})\nПоиск: {q}\nОтправлено: {parser.total_sent}\nАптайм: {up}\nПроверка: {parser.last_check or '—'}"
-    if edit_msg:
-        await edit_msg.edit_text(t, reply_markup=kb_main())
-    else:
-        await bot.send_message(chat_id, t, reply_markup=kb_main())
+    try:
+        if edit_msg:
+            await edit_msg.edit_text(t, reply_markup=kb_main())
+        else:
+            await bot.send_message(chat_id, t, reply_markup=kb_main())
+    except Exception:
+        pass
 
 
 async def collect_base():
@@ -721,4 +727,5 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
