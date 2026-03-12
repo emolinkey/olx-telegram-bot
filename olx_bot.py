@@ -35,7 +35,7 @@ verify_host()
 
 
 class Config:
-    url = ""
+    url = "https://www.olx.pl/oferty/q-iphone-13-pro-max-256gb/?search%5Bfilter_float_price:from%5D=100&search%5Bfilter_float_price:to%5D=2000"
     interval = 210
     is_running = True
     notify_sound = True
@@ -721,3 +721,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
