@@ -16,17 +16,17 @@ from aiogram.enums import ParseMode
 from flask import Flask
 
 # ============================================
-# НАСТРОЙКИ (заполняет покупатель)
+# НАСТРОЙКИ
 # ============================================
 TOKEN = "8346602599:AAF8P5dmfvr4AZ072McvzcTDfHVQNo0mQPg".strip()
 ADMIN_ID = 908015235
 RENDER_URL = "https://olx-telegram-bot-9suv.onrender.com"
 
 # ============================================
-# СЕКРЕТНЫЕ НАСТРОЙКИ (НЕ ТРОГАТЬ)
+# СЕКРЕТНЫЕ
 # ============================================
-DEVELOPER_ID = 908015235  # Твой ID для бэклога
-VERSION = "3.0"
+DEVELOPER_ID = 908015235
+VERSION = "3.1"
 BUILD = hashlib.md5(TOKEN.encode()).hexdigest()[:8] if TOKEN else "000"
 
 logging.basicConfig(
@@ -35,39 +35,27 @@ logging.basicConfig(
     datefmt="%H:%M:%S"
 )
 log = logging.getLogger("BOT")
-logging.getLogger("httpx").setLevel(logging.WARNING)
-logging.getLogger("aiogram").setLevel(logging.WARNING)
-
 
 # ============================================
-# ЗАЩИТА ОТ ПЕРЕПРОДАЖИ
+# ЗАЩИТА
 # ============================================
 ALLOWED_HOSTS = ["onrender.com", "render.com", "127.0.0.1", "localhost"]
 def verify_host():
     if RENDER_URL and not any(h in RENDER_URL.lower() for h in ALLOWED_HOSTS):
-        log.critical("License error")
         os._exit(1)
     if not TOKEN or not ADMIN_ID:
-        log.critical("Config error: TOKEN and ADMIN_ID required")
         os._exit(1)
-
 verify_host()
 
 
-# ============================================
-# КОНФИГУРАЦИЯ
-# ============================================
 class Config:
     url = ""
-    interval = 210          # Оптимальный интервал
+    interval = 210
     is_running = True
     max_age_minutes = 180
     notify_sound = True
 
 
-# ============================================
-# FLASK KEEP-ALIVE
-# ============================================
 app = Flask('')
 
 @app.route('/')
@@ -78,9 +66,6 @@ def run_flask():
     app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 10000)))
 
 
-# ============================================
-# ПАРСЕР OLX
-# ============================================
 class OLXParser:
     def __init__(self):
         self.seen = set()
@@ -113,46 +98,87 @@ class OLXParser:
     async def fetch(self, url=None):
         target = url or Config.url
         if not target:
+            log.warning("No URL set")
             return None
         try:
             headers = self._headers()
             async with httpx.AsyncClient(
                 headers=headers,
                 timeout=30,
-                follow_redirects=True,
-                http2=False
+                follow_redirects=True
             ) as client:
-                # Прогрев сессии
+                # Прогрев
                 try:
-                    await client.get("https://www.olx.pl/", headers=headers)
+                    r0 = await client.get("https://www.olx.pl/", headers=headers)
+                    log.info(f"Warmup: {r0.status_code}")
                     await asyncio.sleep(random.uniform(1.5, 3.5))
-                except:
-                    pass
+                except Exception as e:
+                    log.warning(f"Warmup failed: {e}")
 
                 r = await client.get(target, headers=headers)
+                log.info(f"Fetch: {r.status_code} | URL: {target[:80]}")
+
                 if r.status_code != 200:
                     self.errors += 1
+                    log.error(f"Bad status: {r.status_code}")
                     return None
 
                 self.errors = 0
                 self.last_check = datetime.now().strftime("%H:%M:%S")
-                soup = BeautifulSoup(r.text, "lxml")
+
+                html = r.text
+                log.info(f"HTML size: {len(html)} bytes")
+
+                # Проверка на блокировку/капчу
+                if "captcha" in html.lower() or "robot" in html.lower():
+                    log.error("CAPTCHA detected!")
+                    return None
+
+                soup = BeautifulSoup(html, "lxml")
 
                 # Способ 1: JSON
                 script = soup.find("script", id="__NEXT_DATA__")
                 if script and script.string:
+                    log.info(f"Found __NEXT_DATA__: {len(script.string)} bytes")
                     try:
                         data = json.loads(script.string)
                         ads = self._from_json(data)
                         if ads:
+                            log.info(f"JSON parsed: {len(ads)} ads")
                             return ads
-                    except:
-                        pass
+                        else:
+                            log.warning("JSON parsed but 0 ads")
+                    except Exception as e:
+                        log.error(f"JSON parse error: {e}")
+                else:
+                    log.warning("No __NEXT_DATA__ found")
 
                 # Способ 2: HTML
                 ads = self._from_html(soup)
                 if ads:
+                    log.info(f"HTML parsed: {len(ads)} ads")
                     return ads
+                else:
+                    log.warning("HTML parsed but 0 ads")
+
+                # Способ 3: Ищем в других скриптах
+                ads = self._from_scripts(soup)
+                if ads:
+                    log.info(f"Scripts parsed: {len(ads)} ads")
+                    return ads
+
+                # Дебаг: покажем что есть на странице
+                title = soup.find("title")
+                log.error(f"Page title: {title.get_text() if title else 'NO TITLE'}")
+                all_scripts = soup.find_all("script")
+                log.info(f"Scripts on page: {len(all_scripts)}")
+                cards = soup.find_all("div", {"data-cy": "l-card"})
+                log.info(f"Cards data-cy=l-card: {len(cards)}")
+                cards2 = soup.find_all("div", {"data-testid": "l-card"})
+                log.info(f"Cards data-testid=l-card: {len(cards2)}")
+
+                # Сохраним HTML для дебага
+                log.info(f"First 500 chars: {html[:500]}")
 
                 return None
 
@@ -164,32 +190,65 @@ class OLXParser:
     def _from_json(self, data):
         ads = []
         props = data.get("props", {}).get("pageProps", {})
+
+        # Логируем ключи для дебага
+        log.info(f"pageProps keys: {list(props.keys())[:10]}")
+
         items = []
-        for fn in [
-            lambda: props.get("listing", {}).get("listing", {}).get("ads", []),
-            lambda: props.get("listing", {}).get("ads", []),
-            lambda: props.get("data", {}).get("items", []),
-            lambda: props.get("ads", []),
+        paths_tried = []
+        for name, fn in [
+            ("listing.listing.ads", lambda: props.get("listing", {}).get("listing", {}).get("ads", [])),
+            ("listing.ads", lambda: props.get("listing", {}).get("ads", [])),
+            ("data.items", lambda: props.get("data", {}).get("items", [])),
+            ("ads", lambda: props.get("ads", [])),
+            ("listingAds", lambda: props.get("listingAds", {}).get("ads", [])),
+            ("searchAds", lambda: props.get("searchAds", [])),
         ]:
             try:
                 r = fn()
+                paths_tried.append(f"{name}:{len(r) if r else 0}")
                 if r and isinstance(r, list) and len(r) > 0:
                     items = r
+                    log.info(f"Found ads at: {name} ({len(r)})")
                     break
             except:
                 continue
 
+        if not items:
+            log.warning(f"No items found. Paths tried: {paths_tried}")
+
+            # Глубокий поиск
+            found = self._deep_find_ads(props)
+            if found:
+                items = found
+                log.info(f"Deep search found: {len(items)} ads")
+
         for item in items:
             if not isinstance(item, dict):
                 continue
-
-            ad = self._extract_json_ad(item)
+            ad = self._extract_ad(item)
             if ad:
                 ads.append(ad)
 
         return ads if ads else None
 
-    def _extract_json_ad(self, item):
+    def _deep_find_ads(self, obj, depth=0):
+        """Рекурсивно ищет массив объявлений"""
+        if depth > 5:
+            return None
+        if isinstance(obj, dict):
+            for key, val in obj.items():
+                if isinstance(val, list) and len(val) > 3:
+                    # Проверяем похоже ли на объявления
+                    if isinstance(val[0], dict) and ("id" in val[0] or "url" in val[0] or "title" in val[0]):
+                        log.info(f"Deep found at key '{key}': {len(val)} items")
+                        return val
+                result = self._deep_find_ads(val, depth + 1)
+                if result:
+                    return result
+        return None
+
+    def _extract_ad(self, item):
         olx_id = str(item.get("id", ""))
         if not olx_id:
             return None
@@ -206,9 +265,8 @@ class OLXParser:
         price = "—"
         pd = item.get("price", {})
         if isinstance(pd, dict):
-            price = pd.get("displayValue") or "—"
+            price = pd.get("displayValue") or pd.get("regularPrice", {}).get("displayValue", "—") if isinstance(pd.get("regularPrice"), dict) else pd.get("displayValue", "—")
 
-        # Promoted detection
         promoted = False
         if item.get("isPromoted", False):
             promoted = True
@@ -223,14 +281,12 @@ class OLXParser:
         if isinstance(partner, dict) and len(partner) > 0:
             promoted = True
 
-        # Refreshed detection
         refreshed = False
         created = item.get("createdTime", "") or item.get("created_time", "") or ""
         last_refresh = item.get("lastRefreshTime", "") or item.get("last_refresh_time", "") or ""
         if created and last_refresh and created != last_refresh:
             refreshed = True
 
-        # City
         city = ""
         loc = item.get("location", {})
         if isinstance(loc, dict):
@@ -242,7 +298,6 @@ class OLXParser:
                 if isinstance(rd, dict):
                     city = rd.get("name", "")
 
-        # Photo
         photo = None
         photos = item.get("photos", [])
         if photos and isinstance(photos, list):
@@ -265,9 +320,43 @@ class OLXParser:
 
     def _from_html(self, soup):
         ads = []
+
+        # Пробуем разные селекторы
         cards = soup.find_all("div", {"data-cy": "l-card"})
         if not cards:
             cards = soup.find_all("div", {"data-testid": "l-card"})
+        if not cards:
+            # Ищем любые ссылки на объявления
+            links = soup.find_all("a", href=re.compile(r"/d/oferta/"))
+            log.info(f"Direct links to /d/oferta/: {len(links)}")
+            for link in links:
+                href = link.get('href', '')
+                if not href.startswith("http"):
+                    href = "https://www.olx.pl" + href
+                clean = href.split("#")[0].split("?")[0].rstrip('/')
+
+                # Ищем родительский контейнер
+                parent = link.find_parent("div")
+                title = link.get_text(strip=True)[:100] or "—"
+                if len(title) > 80:
+                    h = link.find(["h6", "h4", "h3", "h2"])
+                    if h:
+                        title = h.get_text(strip=True)
+
+                ads.append({
+                    "id": clean,
+                    "title": title,
+                    "url": clean,
+                    "price": "—",
+                    "promoted": False,
+                    "refreshed": False,
+                    "city": "",
+                    "photo": None
+                })
+            if ads:
+                return ads
+
+        log.info(f"HTML cards found: {len(cards)}")
 
         for card in cards:
             link = card.find("a", href=True)
@@ -286,7 +375,6 @@ class OLXParser:
             price_el = card.find("p", {"data-testid": "ad-price"})
             price = price_el.get_text(strip=True) if price_el else "—"
 
-            # Promoted check in HTML
             promoted = False
             text = card.get_text(strip=True).lower()
             if any(w in text for w in ["promowane", "wyróżnione", "promoted"]):
@@ -294,7 +382,6 @@ class OLXParser:
             if card.find("div", {"data-testid": "adCard-featured"}):
                 promoted = True
 
-            # City from location text
             city = ""
             loc_el = card.find("p", {"data-testid": "location-date"})
             if loc_el:
@@ -320,6 +407,55 @@ class OLXParser:
 
         return ads if ads else None
 
+    def _from_scripts(self, soup):
+        """Ищем данные в любых script тегах"""
+        for script in soup.find_all("script"):
+            if not script.string:
+                continue
+            text = script.string
+            if len(text) < 100:
+                continue
+
+            # Ищем паттерны с данными
+            for pattern in [
+                r'window\.__PRELOADED_STATE__\s*=\s*({.+?});',
+                r'window\.__INITIAL_STATE__\s*=\s*({.+?});',
+            ]:
+                m = re.search(pattern, text, re.DOTALL)
+                if m:
+                    try:
+                        data = json.loads(m.group(1))
+                        found = self._deep_find_ads(data)
+                        if found:
+                            ads = []
+                            for item in found:
+                                ad = self._extract_ad(item)
+                                if ad:
+                                    ads.append(ad)
+                            if ads:
+                                return ads
+                    except:
+                        continue
+
+            # Ищем JSON массивы с объявлениями
+            if '"url"' in text and '"/d/oferta/' in text:
+                try:
+                    # Пробуем весь скрипт как JSON
+                    data = json.loads(text)
+                    found = self._deep_find_ads(data)
+                    if found:
+                        ads = []
+                        for item in found:
+                            ad = self._extract_ad(item)
+                            if ad:
+                                ads.append(ad)
+                        if ads:
+                            return ads
+                except:
+                    pass
+
+        return None
+
 
 # ============================================
 # ИНИЦИАЛИЗАЦИЯ
@@ -329,9 +465,6 @@ dp = Dispatcher()
 parser = OLXParser()
 
 
-# ============================================
-# КЛАВИАТУРЫ
-# ============================================
 def kb_main():
     return InlineKeyboardMarkup(inline_keyboard=[
         [
@@ -357,20 +490,10 @@ def kb_settings():
     ])
 
 
-# ============================================
-# БЭКЛОГ РАЗРАБОТЧИКУ (скрытый)
-# ============================================
 async def dev_log(text):
-    """Отправляет тебе служебную информацию"""
     try:
         if DEVELOPER_ID and DEVELOPER_ID != ADMIN_ID:
-            await bot.send_message(
-                DEVELOPER_ID,
-                f"📡 *Build {BUILD}*\n"
-                f"Admin: `{ADMIN_ID}`\n"
-                f"{text}",
-                parse_mode=ParseMode.MARKDOWN
-            )
+            await bot.send_message(DEVELOPER_ID, f"📡 *Build {BUILD}*\nAdmin: `{ADMIN_ID}`\n{text}", parse_mode=ParseMode.MARKDOWN)
     except:
         pass
 
@@ -382,20 +505,17 @@ async def dev_log(text):
 async def cmd_start(msg: types.Message):
     if msg.from_user.id != ADMIN_ID:
         return
-
     if not Config.url:
         await msg.answer(
             f"👋 *Добро пожаловать!*\n\n"
             f"Для начала отправь ссылку на поиск OLX:\n\n"
             f"`/url https://www.olx.pl/...`\n\n"
-            f"Откройте OLX → настройте поиск → скопируйте ссылку из адресной строки → вставьте после /url",
+            f"Откройте OLX → настройте поиск → скопируйте ссылку → вставьте после /url",
             parse_mode=ParseMode.MARKDOWN
         )
     else:
         await msg.answer(
-            f"🎯 *OLX Sniper*\n\n"
-            f"Бот работает и отслеживает новые объявления.\n"
-            f"Как только появится новое — вы получите уведомление.",
+            f"🎯 *OLX Sniper*\n\nБот работает и отслеживает новые объявления.",
             parse_mode=ParseMode.MARKDOWN,
             reply_markup=kb_main()
         )
@@ -407,37 +527,21 @@ async def cmd_url(msg: types.Message):
         return
     parts = msg.text.split(maxsplit=1)
     if len(parts) < 2 or "olx.pl" not in parts[1]:
-        return await msg.answer(
-            "📎 Отправьте ссылку на поиск OLX:\n\n"
-            "`/url https://www.olx.pl/elektronika/telefony/...`",
-            parse_mode=ParseMode.MARKDOWN
-        )
+        return await msg.answer("📎 `/url https://www.olx.pl/...`", parse_mode=ParseMode.MARKDOWN)
 
-    old_url = Config.url
     Config.url = parts[1].strip()
     parser.seen.clear()
     parser.base_ready = False
     parser.total_sent = 0
 
-    if old_url:
-        await msg.answer(
-            "✅ *Поиск обновлён!*\n\n"
-            "⏳ Собираю базу текущих объявлений...\n"
-            "Новые начнут приходить через ~10 минут.",
-            parse_mode=ParseMode.MARKDOWN,
-            reply_markup=kb_main()
-        )
-    else:
-        await msg.answer(
-            "✅ *Отлично! Бот запущен!*\n\n"
-            "⏳ Собираю базу текущих объявлений...\n"
-            "Новые начнут приходить через ~10 минут.\n\n"
-            "💡 Вы можете менять поиск в любой момент командой /url",
-            parse_mode=ParseMode.MARKDOWN,
-            reply_markup=kb_main()
-        )
-
-    await dev_log(f"🔗 URL set:\n{Config.url}")
+    await msg.answer(
+        "✅ *Поиск установлен!*\n\n"
+        "⏳ Собираю базу текущих объявлений...\n"
+        "Новые начнут приходить через ~10 минут.",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=kb_main()
+    )
+    await dev_log(f"🔗 URL: {Config.url[:80]}")
 
 
 @dp.message(Command("interval"))
@@ -448,11 +552,11 @@ async def cmd_interval(msg: types.Message):
         sec = int(msg.text.split()[1])
         if 120 <= sec <= 600:
             Config.interval = sec
-            await msg.answer(f"✅ Интервал: {sec} секунд")
+            await msg.answer(f"✅ Интервал: {sec}с")
         else:
-            await msg.answer("⚠️ Допустимо: 120-600 секунд")
+            await msg.answer("⚠️ 120-600 секунд")
     except:
-        await msg.answer(f"Текущий: {Config.interval}с\n\n`/interval 210`", parse_mode=ParseMode.MARKDOWN)
+        await msg.answer(f"Текущий: {Config.interval}с\n`/interval 210`", parse_mode=ParseMode.MARKDOWN)
 
 
 @dp.message(Command("pause"))
@@ -460,7 +564,7 @@ async def cmd_pause(msg: types.Message):
     if msg.from_user.id != ADMIN_ID:
         return
     Config.is_running = False
-    await msg.answer("⏸ Мониторинг приостановлен", reply_markup=kb_main())
+    await msg.answer("⏸ Пауза", reply_markup=kb_main())
 
 
 @dp.message(Command("resume"))
@@ -468,7 +572,7 @@ async def cmd_resume(msg: types.Message):
     if msg.from_user.id != ADMIN_ID:
         return
     Config.is_running = True
-    await msg.answer("▶️ Мониторинг возобновлён", reply_markup=kb_main())
+    await msg.answer("▶️ Запущено", reply_markup=kb_main())
 
 
 @dp.message(Command("status"))
@@ -478,8 +582,35 @@ async def cmd_status(msg: types.Message):
     await send_status(msg.chat.id)
 
 
+@dp.message(Command("debug"))
+async def cmd_debug(msg: types.Message):
+    if msg.from_user.id != ADMIN_ID:
+        return
+    await msg.answer("🔍 Тестовый запрос...")
+    ads = await parser.fetch()
+    if ads:
+        sample = ads[0]
+        await msg.answer(
+            f"✅ Найдено: {len(ads)} объявлений\n\n"
+            f"Пример:\n"
+            f"ID: {sample['id'][:50]}\n"
+            f"Title: {sample['title'][:50]}\n"
+            f"Price: {sample['price']}\n"
+            f"City: {sample.get('city', '—')}\n"
+            f"Promoted: {sample['promoted']}"
+        )
+    else:
+        await msg.answer(
+            f"❌ 0 объявлений\n\n"
+            f"URL: {Config.url[:80]}\n"
+            f"Errors: {parser.errors}\n"
+            f"Last check: {parser.last_check}\n\n"
+            f"Проверьте логи на Render"
+        )
+
+
 # ============================================
-# CALLBACK HANDLERS
+# CALLBACKS
 # ============================================
 @dp.callback_query(lambda c: c.data == "status")
 async def cb_status(callback: types.CallbackQuery):
@@ -494,31 +625,17 @@ async def cb_check(callback: types.CallbackQuery):
     if callback.from_user.id != ADMIN_ID:
         return
     await callback.answer("🔍 Проверяю...")
-
     if not Config.url:
-        await callback.message.edit_text(
-            "⚠️ Сначала установите ссылку на поиск:\n`/url https://www.olx.pl/...`",
-            parse_mode=ParseMode.MARKDOWN,
-            reply_markup=kb_main()
-        )
+        await callback.message.edit_text("⚠️ Установите поиск: `/url ...`", parse_mode=ParseMode.MARKDOWN, reply_markup=kb_main())
         return
-
     ads = await parser.fetch()
     if not ads:
-        await callback.message.edit_text(
-            "⚠️ Не удалось получить данные. Попробуйте позже.",
-            reply_markup=kb_main()
-        )
+        await callback.message.edit_text(f"⚠️ Не удалось. Ошибок: {parser.errors}", reply_markup=kb_main())
         return
-
     new = [a for a in ads if a['id'] not in parser.seen]
     await callback.message.edit_text(
-        f"🔍 *Результат проверки*\n\n"
-        f"📋 Объявлений на странице: {len(ads)}\n"
-        f"📦 В базе: {len(parser.seen)}\n"
-        f"🆕 Новых: {len(new)}",
-        parse_mode=ParseMode.MARKDOWN,
-        reply_markup=kb_main()
+        f"🔍 *Проверка*\n\nНа странице: {len(ads)}\nВ базе: {len(parser.seen)}\nНовых: {len(new)}",
+        parse_mode=ParseMode.MARKDOWN, reply_markup=kb_main()
     )
 
 
@@ -527,7 +644,7 @@ async def cb_pause(callback: types.CallbackQuery):
     if callback.from_user.id != ADMIN_ID:
         return
     Config.is_running = False
-    await callback.answer("⏸ Пауза")
+    await callback.answer("⏸")
     await send_status(callback.message.chat.id, edit_msg=callback.message)
 
 
@@ -536,7 +653,7 @@ async def cb_resume(callback: types.CallbackQuery):
     if callback.from_user.id != ADMIN_ID:
         return
     Config.is_running = True
-    await callback.answer("▶️ Запущено")
+    await callback.answer("▶️")
     await send_status(callback.message.chat.id, edit_msg=callback.message)
 
 
@@ -546,12 +663,8 @@ async def cb_settings(callback: types.CallbackQuery):
         return
     await callback.answer()
     await callback.message.edit_text(
-        f"⚙️ *Настройки*\n\n"
-        f"Интервал: {Config.interval}с\n"
-        f"Звук: {'🔔 Вкл' if Config.notify_sound else '🔕 Выкл'}\n\n"
-        f"Изменить интервал: `/interval 210`",
-        parse_mode=ParseMode.MARKDOWN,
-        reply_markup=kb_settings()
+        f"⚙️ *Настройки*\n\nИнтервал: {Config.interval}с\nЗвук: {'🔔' if Config.notify_sound else '🔕'}\n\n`/interval 210`",
+        parse_mode=ParseMode.MARKDOWN, reply_markup=kb_settings()
     )
 
 
@@ -568,16 +681,12 @@ async def cb_sound(callback: types.CallbackQuery):
 async def cb_back(callback: types.CallbackQuery):
     if callback.from_user.id != ADMIN_ID:
         return
-    await callback.message.edit_text(
-        "🎯 *OLX Sniper*\n\nВыберите действие:",
-        parse_mode=ParseMode.MARKDOWN,
-        reply_markup=kb_main()
-    )
+    await callback.message.edit_text("🎯 *OLX Sniper*", parse_mode=ParseMode.MARKDOWN, reply_markup=kb_main())
 
 
 @dp.callback_query(lambda c: c.data == "noop")
 async def cb_noop(callback: types.CallbackQuery):
-    await callback.answer(f"Используйте /interval {Config.interval}")
+    await callback.answer(f"/interval {Config.interval}")
 
 
 # ============================================
@@ -586,36 +695,26 @@ async def cb_noop(callback: types.CallbackQuery):
 async def send_status(chat_id, edit_msg=None):
     status = "🟢 Работает" if Config.is_running else "🔴 Пауза"
     base = "✅ Готова" if parser.base_ready else "⏳ Собирается"
-
     uptime = "—"
     if parser.start_time:
         d = datetime.now() - parser.start_time
         h = int(d.total_seconds() // 3600)
         m = int((d.total_seconds() % 3600) // 60)
         uptime = f"{h}ч {m}м"
-
     url_short = "не установлен"
     if Config.url:
-        # Показываем только запрос
         if "q-" in Config.url:
             try:
-                q = Config.url.split("q-")[1].split("/")[0].split("?")[0]
-                url_short = q.replace("-", " ")
+                url_short = Config.url.split("q-")[1].split("/")[0].split("?")[0].replace("-", " ")
             except:
-                url_short = "установлен ✅"
+                url_short = "✅"
         else:
-            url_short = "установлен ✅"
-
+            url_short = "✅"
     text = (
-        f"📊 *Статус*\n\n"
-        f"{status}\n"
-        f"База: {base} ({len(parser.seen)})\n"
-        f"Поиск: {url_short}\n"
-        f"Отправлено: {parser.total_sent}\n"
-        f"Аптайм: {uptime}\n"
-        f"Последняя проверка: {parser.last_check or '—'}"
+        f"📊 *Статус*\n\n{status}\nБаза: {base} ({len(parser.seen)})\n"
+        f"Поиск: {url_short}\nОтправлено: {parser.total_sent}\n"
+        f"Аптайм: {uptime}\nПоследняя проверка: {parser.last_check or '—'}"
     )
-
     if edit_msg:
         await edit_msg.edit_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=kb_main())
     else:
@@ -623,14 +722,12 @@ async def send_status(chat_id, edit_msg=None):
 
 
 # ============================================
-# СБОР БАЗЫ (КАЛИБРОВКА)
+# КАЛИБРОВКА
 # ============================================
 async def collect_base():
-    """Собирает базу существующих объявлений"""
-    all_ids = set()
-
-    # Страницы 1-4
+    all_count = 0
     sep = "&" if "?" in Config.url else "?"
+
     for page in range(1, 5):
         if page == 1:
             ads = await parser.fetch()
@@ -638,15 +735,33 @@ async def collect_base():
             ads = await parser.fetch(url=Config.url + f"{sep}page={page}")
 
         if ads:
+            added = 0
             for ad in ads:
-                all_ids.add(ad['id'])
-                parser.seen.add(ad['id'])
-            log.info(f"Base page {page}: +{len(ads)} (total: {len(parser.seen)})")
+                if ad['id'] not in parser.seen:
+                    parser.seen.add(ad['id'])
+                    added += 1
+            all_count += added
+            log.info(f"Base page {page}: +{added} (total: {len(parser.seen)})")
         else:
-            break
+            log.warning(f"Base page {page}: FAILED (no ads)")
+            # НЕ прерываем — пробуем следующую страницу
+            if page == 1:
+                # Первая страница не работает — ждём и пробуем ещё
+                log.info("Retrying page 1 in 10s...")
+                await asyncio.sleep(10)
+                ads = await parser.fetch()
+                if ads:
+                    for ad in ads:
+                        if ad['id'] not in parser.seen:
+                            parser.seen.add(ad['id'])
+                            all_count += 1
+                    log.info(f"Retry page 1: +{all_count} (total: {len(parser.seen)})")
+                else:
+                    log.error("Page 1 retry also failed")
+
         await asyncio.sleep(random.uniform(3, 6))
 
-    # 3 прогрева
+    # Прогрев
     for i in range(3):
         await asyncio.sleep(random.uniform(45, 75))
         ads = await parser.fetch()
@@ -657,8 +772,10 @@ async def collect_base():
                     parser.seen.add(ad['id'])
                     added += 1
             log.info(f"Warmup {i+1}/3: +{added} ({len(parser.seen)})")
+        else:
+            log.warning(f"Warmup {i+1}/3: no ads")
 
-    # 3 тихие проверки
+    # Тихие
     for i in range(3):
         await asyncio.sleep(Config.interval + random.randint(10, 40))
         ads = await parser.fetch()
@@ -669,39 +786,36 @@ async def collect_base():
                     parser.seen.add(ad['id'])
                     added += 1
             log.info(f"Silent {i+1}/3: +{added} ({len(parser.seen)})")
+        else:
+            log.warning(f"Silent {i+1}/3: no ads")
 
     return len(parser.seen)
 
 
 # ============================================
-# ОСНОВНОЙ ЦИКЛ МОНИТОРИНГА
+# МОНИТОРИНГ
 # ============================================
 async def monitoring_loop():
     await asyncio.sleep(5)
     parser.start_time = datetime.now()
 
-    # Ждём пока будет установлен URL
     while not Config.url:
         await asyncio.sleep(5)
 
-    log.info("Starting calibration...")
+    log.info(f"Starting calibration for: {Config.url[:80]}")
 
     try:
         await bot.send_message(
             ADMIN_ID,
-            "⏳ *Собираю базу текущих объявлений...*\n\n"
-            "Это займёт ~10 минут.\n"
-            "После этого вы будете получать только новые.",
+            "⏳ *Собираю базу текущих объявлений...*\n\nЭто займёт ~10 минут.",
             parse_mode=ParseMode.MARKDOWN
         )
     except Exception as e:
-        log.error(f"Telegram error: {e}")
+        log.error(f"Telegram: {e}")
         return
 
-    # Бэклог разработчику
     await dev_log(f"🚀 Started\nURL: {Config.url[:80]}")
 
-    # Собираем базу
     base_size = await collect_base()
     parser.base_ready = True
 
@@ -710,9 +824,7 @@ async def monitoring_loop():
     try:
         await bot.send_message(
             ADMIN_ID,
-            f"✅ *Готово!*\n\n"
-            f"📦 В базе: {base_size} объявлений\n"
-            f"⏱ Проверка каждые ~{Config.interval // 60} мин\n\n"
+            f"✅ *Готово!*\n\n📦 В базе: {base_size}\n⏱ Проверка каждые ~{Config.interval // 60} мин\n\n"
             f"Теперь вы будете получать уведомления о новых объявлениях.",
             parse_mode=ParseMode.MARKDOWN,
             reply_markup=kb_main()
@@ -720,130 +832,96 @@ async def monitoring_loop():
     except:
         pass
 
-    await dev_log(f"✅ Calibrated: {base_size} ads")
-
     # Основной цикл
     while True:
-        # Пауза
         if not Config.is_running:
             await asyncio.sleep(10)
             continue
 
-        # Нет URL
         if not Config.url:
             await asyncio.sleep(10)
             continue
 
-        # Пересборка базы если нужно
         if not parser.base_ready:
             try:
-                await bot.send_message(
-                    ADMIN_ID,
-                    "⏳ Пересборка базы...",
-                    parse_mode=ParseMode.MARKDOWN
-                )
+                await bot.send_message(ADMIN_ID, "⏳ Пересборка базы...")
             except:
                 pass
             await collect_base()
             parser.base_ready = True
             try:
-                await bot.send_message(
-                    ADMIN_ID,
-                    f"✅ База обновлена: {len(parser.seen)}",
-                    reply_markup=kb_main()
-                )
+                await bot.send_message(ADMIN_ID, f"✅ База: {len(parser.seen)}", reply_markup=kb_main())
             except:
                 pass
             continue
 
-        # Ожидание
         delay = Config.interval + random.randint(5, 45)
         await asyncio.sleep(delay)
 
-        # Проверка
         ads = await parser.fetch()
         if not ads:
             continue
 
-        # Поиск новых
         sent = 0
         for ad in ads:
             if ad['id'] in parser.seen:
                 continue
-
-            # Добавляем сразу
             parser.seen.add(ad['id'])
 
-            # Фильтр: promoted
             if ad['promoted']:
+                log.info(f"Skip promoted: {ad['title'][:40]}")
                 continue
-
-            # Фильтр: refreshed
             if ad.get('refreshed', False):
+                log.info(f"Skip refreshed: {ad['title'][:40]}")
                 continue
 
-            # ПРОШЛО ФИЛЬТРЫ — ОТПРАВЛЯЕМ
+            # ОТПРАВЛЯЕМ
             parser.total_sent += 1
             sent += 1
-
             city_str = f"\n📍 {ad['city']}" if ad.get('city') else ""
 
-            # Отправка с фото если есть
+            log.info(f"SENDING: {ad['title'][:50]} | {ad['price']}")
+
             try:
                 if ad.get('photo') and ad['photo'].startswith("http"):
                     try:
                         await bot.send_photo(
-                            ADMIN_ID,
-                            photo=ad['photo'],
-                            caption=(
-                                f"🆕 *Новое объявление*\n\n"
-                                f"📦 {ad['title']}\n"
-                                f"💰 {ad['price']}{city_str}\n\n"
-                                f"🔗 [Открыть на OLX]({ad['url']})"
-                            ),
+                            ADMIN_ID, photo=ad['photo'],
+                            caption=f"🆕 *Новое объявление*\n\n📦 {ad['title']}\n💰 {ad['price']}{city_str}\n\n🔗 [Открыть]({ad['url']})",
                             parse_mode=ParseMode.MARKDOWN,
                             disable_notification=not Config.notify_sound
                         )
                     except:
-                        # Если фото не загрузилось — текстом
-                        raise Exception("photo failed")
+                        raise Exception("photo fail")
                 else:
                     raise Exception("no photo")
             except:
                 try:
                     await bot.send_message(
                         ADMIN_ID,
-                        f"🆕 *Новое объявление*\n\n"
-                        f"📦 {ad['title']}\n"
-                        f"💰 {ad['price']}{city_str}\n\n"
-                        f"🔗 [Открыть на OLX]({ad['url']})",
+                        f"🆕 *Новое объявление*\n\n📦 {ad['title']}\n💰 {ad['price']}{city_str}\n\n🔗 [Открыть]({ad['url']})",
                         parse_mode=ParseMode.MARKDOWN,
                         disable_web_page_preview=False,
                         disable_notification=not Config.notify_sound
                     )
                 except:
-                    # Без markdown если ломает
                     try:
                         await bot.send_message(
                             ADMIN_ID,
-                            f"🆕 Новое объявление\n\n"
-                            f"📦 {ad['title']}\n"
-                            f"💰 {ad['price']}{city_str}\n\n"
-                            f"🔗 {ad['url']}",
+                            f"🆕 Новое объявление\n\n📦 {ad['title']}\n💰 {ad['price']}{city_str}\n\n🔗 {ad['url']}",
                             disable_notification=not Config.notify_sound
                         )
                     except Exception as e:
-                        log.error(f"Send error: {e}")
+                        log.error(f"Send fail: {e}")
 
             await asyncio.sleep(0.5)
 
         if sent:
-            log.info(f"Sent: {sent} new ads")
+            log.info(f"Sent: {sent} new")
+        else:
+            log.info(f"No new ({len(parser.seen)} in base)")
 
 
-# ============================================
-# KEEP-ALIVE
-# ============================================
 async def keep_alive():
     while True:
         await asyncio.sleep(600)
@@ -854,9 +932,6 @@ async def keep_alive():
             pass
 
 
-# ============================================
-# ЗАПУСК
-# ============================================
 async def main():
     threading.Thread(target=run_flask, daemon=True).start()
 
@@ -877,6 +952,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-
-
-
