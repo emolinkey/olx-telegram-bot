@@ -18,7 +18,7 @@ from flask import Flask
 # ============================================
 # НАСТРОЙКИ (заполняет покупатель)
 # ============================================
-TOKEN = "8346602599:AAGz22SEJw5dCJVxVXUAli-pf1Xzf424ZT4".strip()           # Токен бота от @BotFather
+TOKEN = "8346602599:AAF8P5dmfvr4AZ072McvzcTDfHVQNo0mQPg".strip()           # Токен бота от @BotFather
 ADMIN_ID = 908015235         # Telegram ID покупателя
 RENDER_URL = "https://olx-telegram-bot-1-hi5z.onrender.com"      # URL на Render
 
@@ -877,4 +877,5 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
