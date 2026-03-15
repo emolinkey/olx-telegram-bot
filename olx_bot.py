@@ -15,7 +15,7 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.enums import ParseMode
 from flask import Flask
 
-TOKEN = "8346602599:AAF8P5dmfvr4AZ072McvzcTDfHVQNo0mQPg".strip()
+TOKEN = "8346602599:AAH5JhZNnBDsi5HHPTCNGaEqCXKx0Tav11A".strip()
 ADMIN_ID = 908015235
 RENDER_URL = "https://olx-telegram-bot-9suv.onrender.com"
 VERSION = "5.0"
